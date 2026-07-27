@@ -1,0 +1,9 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "runpod-sdk-runtime",
+      "changelog-path": "CHANGELOG.md"
+    }
+  }
+}

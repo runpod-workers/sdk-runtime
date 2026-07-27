@@ -1,0 +1,151 @@
+name: Images
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag suffix
+        required: true
+        default: dev
+      runpod_package_spec:
+        description: Runpod SDK package spec
+        required: true
+        default: runpod
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.config.outputs.tag }}
+      sdk_spec: ${{ steps.config.outputs.sdk_spec }}
+      release_tags: ${{ steps.config.outputs.release_tags }}
+    steps:
+      - id: config
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_SDK_SPEC: ${{ inputs.runpod_package_spec }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${RELEASE_TAG#v}"
+            sdk_spec="runpod"
+            release_tags="true"
+          else
+            tag="$INPUT_TAG"
+            sdk_spec="$INPUT_SDK_SPEC"
+            release_tags="false"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sdk_spec=$sdk_spec" >> "$GITHUB_OUTPUT"
+          echo "release_tags=$release_tags" >> "$GITHUB_OUTPUT"
+
+  gpu-base:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Clear space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        env:
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          RELEASE_TAGS: ${{ needs.prepare.outputs.release_tags }}
+        run: |
+          repo="runpod/gpu-base"
+          tags="$repo:py${{ matrix.python-version }}-$VERSION"
+          if [ "$RELEASE_TAGS" = "true" ]; then
+            tags="$tags,$repo:py${{ matrix.python-version }}-latest"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/gpu-base.Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: PYTHON_VERSION=${{ matrix.python-version }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,scope=gpu-base-py${{ matrix.python-version }}
+          cache-to: type=gha,mode=max,scope=gpu-base-py${{ matrix.python-version }}
+
+  runtimes:
+    needs: [prepare, gpu-base]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [task, queue, api]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        accelerator: [cpu, gpu]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Clear space
+        if: matrix.accelerator == 'gpu'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute image configuration
+        id: image
+        env:
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          RELEASE_TAGS: ${{ needs.prepare.outputs.release_tags }}
+        run: |
+          if [ "${{ matrix.accelerator }}" = "gpu" ]; then
+            base="runpod/gpu-base:py${{ matrix.python-version }}-$VERSION"
+            repo="runpod/${{ matrix.kind }}-gpu"
+          else
+            base="python:${{ matrix.python-version }}-slim"
+            repo="runpod/${{ matrix.kind }}"
+          fi
+          tags="$repo:py${{ matrix.python-version }}-$VERSION"
+          if [ "$RELEASE_TAGS" = "true" ]; then
+            tags="$tags,$repo:py${{ matrix.python-version }}-latest"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/${{ matrix.kind }}.Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ steps.image.outputs.base }}
+            RUNPOD_PACKAGE_SPEC=${{ needs.prepare.outputs.sdk_spec }}
+          tags: ${{ steps.image.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.kind }}-${{ matrix.accelerator }}-py${{ matrix.python-version }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.kind }}-${{ matrix.accelerator }}-py${{ matrix.python-version }}

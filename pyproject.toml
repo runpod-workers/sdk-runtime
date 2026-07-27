@@ -1,0 +1,57 @@
+[project]
+name = "runpod-sdk-runtime"
+version = "0.0.0"
+description = "Worker runtimes for the Runpod Python SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Runpod", email = "engineer@runpod.io" },
+]
+dependencies = [
+    "cloudpickle>=3.0.0",
+    "fastapi[standard]>=0.115.0",
+    "runpod",
+    "uvicorn>=0.30.0",
+]
+
+[project.urls]
+Homepage = "https://runpod.io"
+Repository = "https://github.com/runpod-workers/sdk-runtime"
+"Bug Tracker" = "https://github.com/runpod-workers/sdk-runtime/issues"
+
+[dependency-groups]
+test = [
+    "httpx>=0.27.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+lint = [
+    "ruff>=0.15.0",
+]
+
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "S"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/runpod_sdk_runtime/api/server.py" = ["S104"]
+"src/runpod_sdk_runtime/bootstrap.py" = ["S104", "S310", "S603", "S606", "S607"]
+"src/runpod_sdk_runtime/executor.py" = ["S603", "S607"]
+"src/runpod_sdk_runtime/task/runner.py" = ["S104", "S110", "S310"]
+"tests/*" = ["S105", "S106", "S310"]
