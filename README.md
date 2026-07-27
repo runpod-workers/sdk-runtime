@@ -1,8 +1,6 @@
 # Runpod SDK Runtime
 
 Worker runtime package and container images for apps built with the Runpod Python SDK.
-The runtime has its own release cadence so worker fixes and image updates can ship
-independently from SDK releases.
 
 ## Runtime images
 
@@ -20,8 +18,7 @@ packages excluded from GPU deployment artifacts.
 | `runpod/task-gpu:py3.12-latest` | ephemeral GPU task pods |
 
 Python 3.10 through 3.14 are published. Release tags use
-`py<python>-<runtime-version>`, and `latest` tracks the newest release. Manual image
-publishes support channels such as `dev`.
+`py<python>-<runtime-version>`, and `latest` tracks the newest release.
 
 ## Package
 
