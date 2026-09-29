@@ -28,17 +28,30 @@ TOKEN = "test-token"
 
 
 @pytest.fixture()
-def server(monkeypatch):
+def server(monkeypatch, request):
+    from runpod.apps.volume import _configure_mounts
+
     monkeypatch.setattr(task_runner, "TOKEN", TOKEN)
     monkeypatch.setattr(task_runner, "_job_state", {"status": "NONE", "response": None})
+    monkeypatch.setenv("RUNPOD_MOUNTS", json.dumps(getattr(request, "param", [])))
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     httpd.daemon_threads = True
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    ready = threading.Event()
+
+    def started_server(*_):
+        ready.set()
+        return httpd
+
+    monkeypatch.setattr(task_runner, "ThreadingHTTPServer", started_server)
+    monkeypatch.setattr(task_runner, "_watchdog", lambda: None)
+    thread = threading.Thread(target=task_runner.main, daemon=True)
     thread.start()
+    assert ready.wait(timeout=5), "task runner did not finish startup"
     yield f"http://127.0.0.1:{httpd.server_port}"
     httpd.shutdown()
     thread.join(timeout=5)
     httpd.server_close()
+    _configure_mounts([])
 
 
 def _request(url, method="GET", body=None, token=TOKEN):
@@ -116,6 +129,34 @@ def test_submit_and_result(server):
     assert body["status"] == "DONE"
     assert body["response"]["success"] is True
     assert body["response"]["json_result"] == "done"
+
+
+@pytest.mark.parametrize(
+    "server",
+    [[{"kind": "network", "reference": "data", "id": "nv-1", "path": "/data"}]],
+    indirect=True,
+)
+def test_mounts_survive_threaded_execution(server, monkeypatch):
+    monkeypatch.setenv("RUNPOD_MOUNTS", "[]")
+    status, body = _request(
+        f"{server}/execute",
+        method="POST",
+        body={
+            "function_name": "mounted",
+            "function_code": (
+                "from runpod.apps.volume import NetworkVolume\n"
+                "imported = str(NetworkVolume('data').path)\n"
+                "async def mounted():\n"
+                "    yield imported\n"
+                "    yield str(NetworkVolume('nv-1').path)\n"
+            ),
+            "serialization_format": "json",
+            "mounts": [],
+        },
+    )
+    assert status == 200
+    assert body["success"] is True
+    assert body["json_result"] == ["/data", "/data"]
 
 
 def test_unknown_path_404(server):

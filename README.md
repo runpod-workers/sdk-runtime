@@ -38,6 +38,22 @@ python -m runpod_sdk_runtime.task.runner
 
 `RUNPOD_RUNTIME_KIND` selects `queue` or `api` when running the shared bootstrap.
 
+## Storage bindings
+
+Apps provisioning supplies `RUNPOD_MOUNTS` as a JSON array of resolved bindings.
+Each entry contains `kind` (`network` or `global`), the declared `reference`, the
+resolved volume `id`, and its absolute `path`.
+
+Queue, API, and task workers install these bindings before importing user modules
+or running initialization hooks. The SDK's `volume.path` accessor uses this
+worker-level map across synchronous, asynchronous, streaming, and threaded code.
+An absent variable represents an empty mount map; malformed configuration fails
+startup. Request payloads do not configure filesystem mounts.
+
+The runtime requires an Apps SDK build providing `NetworkVolume`, `GlobalVolume`,
+and the worker mount-binding contract. Publish compatible SDK and runtime
+packages/images together before deploying apps with storage bindings.
+
 ## Development
 
 Install the Apps SDK checkout first, then install this project:

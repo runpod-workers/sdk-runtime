@@ -13,10 +13,15 @@ from runpod_sdk_runtime.api import server
 
 
 @pytest.fixture(autouse=True)
-def clean_registry():
+def clean_registry(monkeypatch):
+    from runpod.apps.volume import _configure_mounts
+
+    monkeypatch.delenv("RUNPOD_MOUNTS", raising=False)
+    _configure_mounts([])
     _clear_registry()
     yield
     _clear_registry()
+    _configure_mounts([])
 
 
 def _write_project(tmp_path, monkeypatch, module="main_cls"):
@@ -254,3 +259,53 @@ class TestLiveDispatcher:
         # identical source: no rebuild, state survives
         client.post("/_runpod/sync", json={"source": source, "resource": "S"})
         assert client.post("/add", json={"x": 3}).json() == {"total": 5}
+
+
+@pytest.mark.parametrize("deployed", [False, True])
+def test_mounts_before_module_init_and_routes(monkeypatch, tmp_path, deployed):
+    monkeypatch.setenv(
+        "RUNPOD_MOUNTS",
+        json.dumps(
+            [{"kind": "network", "reference": "data", "id": "nv-1", "path": "/data"}]
+        ),
+    )
+    source = textwrap.dedent(
+        """
+        from runpod import App, get, init
+        from runpod.apps.volume import NetworkVolume
+
+        imported = str(NetworkVolume("data").path)
+        app = App("mounts-api")
+
+        @app.api(name="mounted", cpu="cpu3c-1-2")
+        class Mounted:
+            @init
+            async def setup(self):
+                self.initialized = str(NetworkVolume("nv-1").path)
+
+            @get("/mounted")
+            def mounted(self):
+                return [imported, self.initialized, str(NetworkVolume("data").path)]
+        """
+    )
+    if deployed:
+        (tmp_path / "mounts_api.py").write_text(source)
+        (tmp_path / server.MANIFEST_NAME).write_text(
+            json.dumps({"resources": [{"name": "mounted", "module": "mounts_api"}]})
+        )
+        monkeypatch.setattr(server, "APP_DIR", str(tmp_path))
+        monkeypatch.setenv("FLASH_RESOURCE_NAME", "mounted")
+    else:
+        monkeypatch.delenv("FLASH_RESOURCE_NAME", raising=False)
+        monkeypatch.delenv("RUNPOD_RESOURCE_NAME", raising=False)
+    app = server.build_app()
+    # lifespan, live sync, and threaded routes must share the startup bindings.
+    monkeypatch.setenv("RUNPOD_MOUNTS", "[]")
+    with TestClient(app) as client:
+        if not deployed:
+            response = client.post(
+                "/_runpod/sync",
+                json={"source": source, "resource": "mounted", "mounts": []},
+            )
+            assert response.status_code == 200
+        assert client.get("/mounted").json() == ["/data", "/data", "/data"]

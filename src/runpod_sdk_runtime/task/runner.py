@@ -26,6 +26,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from runpod_sdk_runtime.executor import execute_request
+from runpod_sdk_runtime.mounts import configure_mounts
 
 PORT = int(os.environ.get("RUNPOD_TASK_PORT", "8080"))
 TOKEN = os.environ.get("RUNPOD_TASK_TOKEN", "")
@@ -199,6 +200,7 @@ def main() -> None:
     if not TOKEN:
         sys.stderr.write("[task-runner] RUNPOD_TASK_TOKEN not set, exiting\n")
         sys.exit(1)
+    configure_mounts()
     _touch_contact()
     threading.Thread(target=_watchdog, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
