@@ -8,4 +8,4 @@
 
 ### Bug Fixes
 
-* Enforce the SDK's absolute task deadline during active work; exit only after acknowledged pod deletion and retry failed cleanup.
+* Keep active tasks running indefinitely; retry failed idle cleanup and exit only after acknowledged pod deletion.

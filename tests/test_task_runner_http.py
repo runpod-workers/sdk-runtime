@@ -164,7 +164,7 @@ def test_unknown_path_404(server):
 
 
 class TestWatchdog:
-    def test_running_job_without_deadline(self):
+    def test_running_job_is_exempt_from_idle_cleanup(self):
         from runpod_sdk_runtime.task.runner import _should_self_terminate
 
         assert not _should_self_terminate("RUNNING", 0, 10_000, 600)
@@ -190,19 +190,8 @@ class TestWatchdog:
 
         assert not _should_self_terminate("NONE", None, 10_000, 600)
 
-    def test_inline_execution_without_deadline(self):
+    def test_inline_execution_is_exempt_from_idle_cleanup(self):
         assert not task_runner._should_self_terminate("NONE", 0, 10_000, 600, inline=1)
-
-    def test_deadline_overrides_active_work_and_fresh_contact(self):
-        assert not task_runner._should_self_terminate(
-            "RUNNING", 999, 999, 600, deadline=1000
-        )
-        assert task_runner._should_self_terminate(
-            "RUNNING", 1000, 1000, 600, deadline=1000
-        )
-        assert task_runner._should_self_terminate(
-            "NONE", 1000, 1000, 600, inline=1, deadline=1000
-        )
 
     def test_authed_requests_touch_contact(self, server, monkeypatch):
         monkeypatch.setattr(task_runner, "_last_contact", {"ts": None})

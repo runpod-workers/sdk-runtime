@@ -49,12 +49,10 @@ configuration fails startup.
 
 ## Task cleanup
 
-The task watchdog checks `RUNPOD_TASK_DEADLINE` every 15 seconds. This absolute
-timestamp in Unix epoch seconds is set by the SDK and survives container restarts.
-Once reached, the runtime requests pod deletion even during active work or recent client
-contact. Without a deadline, only idle cleanup applies:
-`RUNPOD_TASK_IDLE_TIMEOUT` (600 seconds by default) reaps abandoned tasks and
-uncollected results, but exempts active background jobs and inline executions.
+Active background jobs and inline executions can run indefinitely, including
+after the client disconnects. The watchdog checks for idle cleanup every 15
+seconds. `RUNPOD_TASK_IDLE_TIMEOUT` (600 seconds by default) applies only to
+pods waiting for submission or holding uncollected results.
 
 Self-deletion requires `RUNPOD_API_KEY` and `RUNPOD_POD_ID`. The runtime exits
 only after GraphQL acknowledges `podTerminate` without errors. Transient
