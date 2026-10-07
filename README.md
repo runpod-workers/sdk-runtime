@@ -54,6 +54,23 @@ The runtime requires an Apps SDK build providing `NetworkVolume`, `GlobalVolume`
 and the worker mount-binding contract. Publish compatible SDK and runtime
 packages/images together before deploying apps with storage bindings.
 
+## Task cleanup
+
+The task watchdog deletes idle pods and pods with uncollected completed results
+after `RUNPOD_TASK_IDLE_TIMEOUT` (600 seconds by default). Active background jobs
+and inline executions are exempt, so intentional detached work can finish.
+
+Self-deletion requires the injected pod-scoped `RUNPOD_API_KEY` and
+`RUNPOD_POD_ID`. The runtime exits only after GraphQL acknowledges `podTerminate`
+without errors. Transient failures receive three bounded attempts; failed or
+unacknowledged deletion leaves the runtime alive for the next watchdog pass.
+Missing credentials and permanent errors are logged, not treated as deletion.
+Exiting or restarting a container alone does not stop pod billing.
+
+The task's `terminateAfter` backstop requires control-plane persistence and
+expiry enforcement. The idle watchdog does not impose a second deadline on
+active detached work.
+
 ## Development
 
 Install the Apps SDK checkout first, then install this project:

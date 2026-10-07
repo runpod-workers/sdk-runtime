@@ -23,6 +23,9 @@ import json
 import os
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from runpod_sdk_runtime.executor import execute_request
@@ -31,13 +34,12 @@ from runpod_sdk_runtime.mounts import configure_mounts
 PORT = int(os.environ.get("RUNPOD_TASK_PORT", "8080"))
 TOKEN = os.environ.get("RUNPOD_TASK_TOKEN", "")
 
-# watchdog: self-terminate when the client is clearly gone. RUNNING
-# jobs are never killed (terminateAfter is the runaway backstop);
-# state NONE means the client died before submitting, while DONE means
-# the result sat uncollected. normal flows poll every ~2s, so these never fire
-# for a live client.
+# the watchdog reaps unsubmitted jobs and uncollected results after contact stops.
+# running jobs are exempt; absolute deadlines require control-plane enforcement.
 IDLE_TIMEOUT = float(os.environ.get("RUNPOD_TASK_IDLE_TIMEOUT", "600"))
 WATCHDOG_INTERVAL = 15.0
+TERMINATE_ATTEMPTS = 3
+TERMINATE_TIMEOUT = 5.0
 
 # single background job slot for /submit + /result
 _job_lock = threading.Lock()
@@ -64,42 +66,79 @@ def _should_self_terminate(status, last_contact, now, idle_timeout, inline=0):
 
 
 def _terminate_self():
-    """terminate this pod via the injected pod-scoped api key.
-
-    every pod carries a RUNPOD_API_KEY scoped to itself; podTerminate
-    with it removes the pod entirely. exiting the process is the
-    fallback (stops the workload; terminateAfter finishes the job).
-    """
-    import json as _json
-    import urllib.request
-
+    """exit only after the control plane acknowledges pod deletion."""
     pod_id = os.environ.get("RUNPOD_POD_ID")
     api_key = os.environ.get("RUNPOD_API_KEY")
-    if pod_id and api_key:
+    if not pod_id or not api_key:
+        sys.stderr.write(
+            "[task-runner] cannot delete pod: missing RUNPOD_POD_ID or RUNPOD_API_KEY\n"
+        )
+        return False
+    api_base = os.environ.get("RUNPOD_API_BASE_URL", "https://api.runpod.io")
+    payload = json.dumps(
+        {
+            "query": (
+                "mutation podTerminate($input: PodTerminateInput!) "
+                "{ podTerminate(input: $input) }"
+            ),
+            "variables": {"input": {"podId": pod_id}},
+        }
+    ).encode()
+    request = urllib.request.Request(
+        f"{api_base.rstrip('/')}/graphql",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+    for attempt in range(TERMINATE_ATTEMPTS):
+        retryable = False
         try:
-            api_base = os.environ.get("RUNPOD_API_BASE_URL", "https://api.runpod.io")
-            payload = _json.dumps(
-                {
-                    "query": (
-                        "mutation podTerminate($input: PodTerminateInput!) "
-                        "{ podTerminate(input: $input) }"
-                    ),
-                    "variables": {"input": {"podId": pod_id}},
-                }
-            ).encode()
-            request = urllib.request.Request(
-                f"{api_base}/graphql",
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                },
+            with urllib.request.urlopen(request, timeout=TERMINATE_TIMEOUT) as response:  # noqa: S310
+                body = json.load(response)
+            errors = body.get("errors") if isinstance(body, dict) else None
+            data = body.get("data") if isinstance(body, dict) else None
+            if (
+                not errors
+                and isinstance(data, dict)
+                and "podTerminate" in data
+                and data["podTerminate"] is None
+            ):
+                sys.stderr.write(f"[task-runner] pod {pod_id} deletion acknowledged\n")
+                os._exit(0)
+                return True
+            if isinstance(errors, list) and errors:
+                retryable = all(
+                    isinstance(error, dict)
+                    and isinstance(error.get("extensions"), dict)
+                    and error["extensions"].get("code")
+                    in {
+                        "INTERNAL_SERVER_ERROR",
+                        "SERVICE_UNAVAILABLE",
+                        "TOO_MANY_REQUESTS",
+                        "TIMEOUT",
+                    }
+                    for error in errors
+                )
+            failure = "graphql errors" if errors else "missing deletion acknowledgment"
+        except urllib.error.HTTPError as exc:
+            retryable = exc.code == 429 or 500 <= exc.code < 600
+            failure = f"http {exc.code}"
+            exc.close()
+        except (urllib.error.URLError, OSError) as exc:
+            retryable = True
+            failure = str(exc)
+        except (ValueError, TypeError) as exc:
+            failure = f"invalid deletion response: {exc}"
+        if not retryable or attempt == TERMINATE_ATTEMPTS - 1:
+            sys.stderr.write(
+                f"[task-runner] pod {pod_id} deletion failed: {failure}; "
+                "keeping runtime alive for watchdog retry\n"
             )
-            urllib.request.urlopen(request, timeout=30)  # noqa: S310
-            sys.stderr.write("[task-runner] self-terminated (abandoned)\n")
-        except Exception:  # noqa: BLE001 - fall through to process exit
-            pass
-    os._exit(0)
+            return False
+        time.sleep(0.5 * (2**attempt))
+    return False
 
 
 def _watchdog():
@@ -107,14 +146,15 @@ def _watchdog():
 
     while True:
         time.sleep(WATCHDOG_INTERVAL)
-        if _should_self_terminate(
-            _job_state["status"],
-            _last_contact["ts"],
-            time.time(),
-            IDLE_TIMEOUT,
-            inline=_inline_executions["count"],
-        ):
-            _terminate_self()
+        with _job_lock:
+            if _should_self_terminate(
+                _job_state["status"],
+                _last_contact["ts"],
+                time.time(),
+                IDLE_TIMEOUT,
+                inline=_inline_executions["count"],
+            ):
+                _terminate_self()
 
 
 class Handler(BaseHTTPRequestHandler):

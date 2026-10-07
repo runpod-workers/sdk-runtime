@@ -192,6 +192,9 @@ class TestWatchdog:
 
         assert not _should_self_terminate("NONE", None, 10_000, 600)
 
+    def test_inline_execution_never_killed(self):
+        assert not task_runner._should_self_terminate("NONE", 0, 10_000, 600, inline=1)
+
     def test_authed_requests_touch_contact(self, server, monkeypatch):
         monkeypatch.setattr(task_runner, "_last_contact", {"ts": None})
         _request(f"{server}/result")
@@ -199,49 +202,80 @@ class TestWatchdog:
 
 
 class TestSelfTermination:
-    def test_terminate_self_calls_graphql_then_exits(self, monkeypatch):
-        import contextlib
-        import io as _io
+    def _api(self, monkeypatch, responses):
+        import io
 
-        calls = []
-
-        @contextlib.contextmanager
-        def _response():
-            yield _io.BytesIO(b"{}")
-
-        def fake_urlopen(req, timeout=None):
-            calls.append((req.full_url, req.data))
-            return _response()
-
+        remaining = iter(responses)
         exits = []
+        attempts = []
+
+        def request(req, timeout=None):
+            attempts.append(req)
+            response = next(remaining)
+            if isinstance(response, Exception):
+                raise response
+            return io.BytesIO(json.dumps(response).encode())
+
         monkeypatch.setenv("RUNPOD_POD_ID", "pod-1")
         monkeypatch.setenv("RUNPOD_API_KEY", "pod-scoped-key")
-        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-        monkeypatch.setattr(task_runner.os, "_exit", lambda code: exits.append(code))
-        task_runner._terminate_self()
+        monkeypatch.setattr("urllib.request.urlopen", request)
+        monkeypatch.setattr(task_runner.os, "_exit", exits.append)
+        monkeypatch.setattr(task_runner.time, "sleep", lambda delay: None)
+        return exits, attempts
 
-        assert exits == [0]
-        url, body = calls[0]
-        assert url.endswith("/graphql")
-        assert b"podTerminate" in body
-        assert b"pod-1" in body
-
-    def test_terminate_self_exits_without_credentials(self, monkeypatch):
-        exits = []
-        monkeypatch.delenv("RUNPOD_POD_ID", raising=False)
-        monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
-        monkeypatch.setattr(task_runner.os, "_exit", lambda code: exits.append(code))
-        task_runner._terminate_self()
+    def test_void_acknowledgment_allows_exit(self, monkeypatch):
+        exits, _ = self._api(monkeypatch, [{"data": {"podTerminate": None}}])
+        assert task_runner._terminate_self() is True
         assert exits == [0]
 
-    def test_terminate_self_survives_api_failure(self, monkeypatch):
-        def fail(req, timeout=None):
-            raise OSError("network down")
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {},
+            {"data": {}},
+            {"data": {"podTerminate": False}},
+            {"errors": [{"message": "forbidden"}], "data": {"podTerminate": None}},
+        ],
+    )
+    def test_unacknowledged_deletion_keeps_runtime_alive(self, monkeypatch, body):
+        exits, attempts = self._api(monkeypatch, [body])
+        assert task_runner._terminate_self() is False
+        assert not exits
+        assert len(attempts) == 1
 
-        exits = []
-        monkeypatch.setenv("RUNPOD_POD_ID", "pod-1")
-        monkeypatch.setenv("RUNPOD_API_KEY", "k")
-        monkeypatch.setattr("urllib.request.urlopen", fail)
-        monkeypatch.setattr(task_runner.os, "_exit", lambda code: exits.append(code))
-        task_runner._terminate_self()
+    @pytest.mark.parametrize("missing", ["RUNPOD_POD_ID", "RUNPOD_API_KEY"])
+    def test_missing_credentials_do_not_exit(self, monkeypatch, missing):
+        exits, attempts = self._api(monkeypatch, [])
+        monkeypatch.delenv(missing)
+        assert task_runner._terminate_self() is False
+        assert not attempts
+        assert not exits
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            urllib.error.HTTPError("https://api/graphql", 429, "slow down", {}, None),
+            urllib.error.HTTPError("https://api/graphql", 503, "unavailable", {}, None),
+            urllib.error.URLError("connection reset"),
+            {"errors": [{"extensions": {"code": "INTERNAL_SERVER_ERROR"}}]},
+        ],
+    )
+    def test_transient_failure_recovers(self, monkeypatch, failure):
+        exits, _ = self._api(monkeypatch, [failure, {"data": {"podTerminate": None}}])
+        assert task_runner._terminate_self() is True
         assert exits == [0]
+
+    def test_retry_exhaustion_keeps_runtime_alive(self, monkeypatch):
+        exits, attempts = self._api(
+            monkeypatch, [OSError("network down")] * task_runner.TERMINATE_ATTEMPTS
+        )
+        assert task_runner._terminate_self() is False
+        assert len(attempts) == task_runner.TERMINATE_ATTEMPTS
+        assert not exits
+
+    def test_auth_failure_does_not_retry_or_exit(self, monkeypatch):
+        error = urllib.error.HTTPError("https://api/graphql", 401, "denied", {}, None)
+        exits, attempts = self._api(monkeypatch, [error])
+        assert task_runner._terminate_self() is False
+        assert len(attempts) == 1
+        assert not exits
