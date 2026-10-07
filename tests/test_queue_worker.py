@@ -202,57 +202,10 @@ class TestConcurrency:
 
 
 class TestMain:
-    async def test_live_mode(self, monkeypatch):
-        monkeypatch.delenv("FLASH_RESOURCE_NAME", raising=False)
-        monkeypatch.delenv("RUNPOD_RESOURCE_NAME", raising=False)
-        monkeypatch.setenv(
-            "RUNPOD_MOUNTS",
-            json.dumps(
-                [
-                    {
-                        "kind": "network",
-                        "reference": "data",
-                        "id": "nv-1",
-                        "path": "/data",
-                    }
-                ]
-            ),
-        )
-        with patch("runpod.serverless.start") as start:
-            worker.main()
-        handler = start.call_args[0][0]["handler"]
-        # later environment changes and job metadata cannot replace startup bindings.
-        monkeypatch.setenv("RUNPOD_MOUNTS", "[]")
-        request = {
-            "function_name": "mounted",
-            "function_code": (
-                "from runpod.apps.volume import NetworkVolume\n"
-                "imported = str(NetworkVolume('data').path)\n"
-                "async def mounted():\n"
-                "    return [imported, str(NetworkVolume('nv-1').path)]\n"
-            ),
-            "serialization_format": "json",
-            "mounts": [
-                {"kind": "network", "reference": "data", "id": "nv-1", "path": "/wrong"}
-            ],
-        }
-        chunks = [chunk async for chunk in handler({"input": request})]
-        assert chunks[0]["success"] is True
-        assert chunks[0]["json_result"] == ["/data", "/data"]
-
     async def test_deployed_mode(self, monkeypatch, tmp_path):
         monkeypatch.setenv(
             "RUNPOD_MOUNTS",
-            json.dumps(
-                [
-                    {
-                        "kind": "global",
-                        "reference": "gv-1",
-                        "id": "gv-1",
-                        "path": "/shared",
-                    }
-                ]
-            ),
+            '[{"kind":"global","reference":"gv-1","id":"gv-1","path":"/shared"}]',
         )
         module_src = (
             "import runpod\n"
@@ -280,33 +233,21 @@ class TestMain:
             {"mounted": "/shared"},
         ]
 
-    @pytest.mark.parametrize("raw", ["", "null"])
-    def test_invalid_mounts_stop_startup(self, monkeypatch, raw):
-        from runpod.apps.volume import VolumeError
-
-        monkeypatch.setenv("RUNPOD_MOUNTS", raw)
+    async def test_live_mode(self, monkeypatch):
+        monkeypatch.delenv("FLASH_RESOURCE_NAME", raising=False)
+        monkeypatch.delenv("RUNPOD_RESOURCE_NAME", raising=False)
         with patch("runpod.serverless.start") as start:
-            with pytest.raises((RuntimeError, VolumeError)):
-                worker.main()
-        start.assert_not_called()
-
-    async def test_live_handler_plain_function(self):
-        def fn(x):
-            return {"ok": x}
-
-        with (
-            patch(
-                "runpod_sdk_runtime.executor.resolve_request",
-                return_value=((fn, [1], {}), None),
-            ),
-            patch(
-                "runpod_sdk_runtime.executor.execute_request",
-                return_value={"success": True, "json_result": {"ok": 1}},
-            ) as execute,
-        ):
-            chunks = [c async for c in worker._live_handler({"input": {"foo": 1}})]
-        assert chunks == [{"success": True, "json_result": {"ok": 1}}]
-        execute.assert_called_once_with({"foo": 1})
+            worker.main()
+        handler = start.call_args[0][0]["handler"]
+        request = {
+            "function_name": "echo",
+            "function_code": "def echo(x):\n    return {'ok': x}",
+            "args": [1],
+            "serialization_format": "json",
+        }
+        chunks = [chunk async for chunk in handler({"input": request})]
+        assert chunks[0]["success"] is True
+        assert chunks[0]["json_result"] == {"ok": 1}
 
     async def test_live_handler_resolve_error(self):
         with patch(

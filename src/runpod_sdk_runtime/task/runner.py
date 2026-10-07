@@ -34,9 +34,13 @@ from runpod_sdk_runtime.mounts import configure_mounts
 PORT = int(os.environ.get("RUNPOD_TASK_PORT", "8080"))
 TOKEN = os.environ.get("RUNPOD_TASK_TOKEN", "")
 
-# the watchdog reaps unsubmitted jobs and uncollected results after contact stops.
-# running jobs are exempt; absolute deadlines require control-plane enforcement.
+# active work is exempt from idle cleanup, but never from the task deadline.
 IDLE_TIMEOUT = float(os.environ.get("RUNPOD_TASK_IDLE_TIMEOUT", "600"))
+TASK_DEADLINE = (
+    float(os.environ["RUNPOD_TASK_DEADLINE"])
+    if "RUNPOD_TASK_DEADLINE" in os.environ
+    else None
+)
 WATCHDOG_INTERVAL = 15.0
 TERMINATE_ATTEMPTS = 3
 TERMINATE_TIMEOUT = 5.0
@@ -45,8 +49,7 @@ TERMINATE_TIMEOUT = 5.0
 _job_lock = threading.Lock()
 _job_state = {"status": "NONE", "response": None}
 _last_contact = {"ts": None}  # set at server start
-# inline /execute requests in flight; the watchdog must not terminate
-# the pod while one runs (long executes outlive the idle timeout)
+# inline requests are protected from idle cleanup while running.
 _inline_executions = {"count": 0}
 
 
@@ -56,8 +59,11 @@ def _touch_contact():
     _last_contact["ts"] = time.time()
 
 
-def _should_self_terminate(status, last_contact, now, idle_timeout, inline=0):
-    """the watchdog decision: kill only provably-abandoned pods."""
+def _should_self_terminate(
+    status, last_contact, now, idle_timeout, inline=0, deadline=None
+):
+    if deadline is not None and now >= deadline:
+        return True
     if status == "RUNNING" or inline > 0:
         return False
     if last_contact is None:
@@ -153,6 +159,7 @@ def _watchdog():
                 time.time(),
                 IDLE_TIMEOUT,
                 inline=_inline_executions["count"],
+                deadline=TASK_DEADLINE,
             ):
                 _terminate_self()
 

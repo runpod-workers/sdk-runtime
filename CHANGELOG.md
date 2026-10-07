@@ -8,4 +8,4 @@
 
 ### Bug Fixes
 
-* Require acknowledged task pod deletion before exiting; retry transient termination failures and keep idle runtimes available for watchdog recovery without interrupting active detached work.
+* Enforce the SDK's absolute task deadline during active work; exit only after acknowledged pod deletion and retry failed cleanup.

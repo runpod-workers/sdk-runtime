@@ -40,36 +40,26 @@ python -m runpod_sdk_runtime.task.runner
 
 ## Storage bindings
 
-Apps provisioning supplies `RUNPOD_MOUNTS` as a JSON array of resolved bindings.
-Each entry contains `kind` (`network` or `global`), the declared `reference`, the
-resolved volume `id`, and its absolute `path`.
-
-Queue, API, and task workers install these bindings before importing user modules
-or running initialization hooks. The SDK's `volume.path` accessor uses this
-worker-level map across synchronous, asynchronous, streaming, and threaded code.
-An absent variable represents an empty mount map; malformed configuration fails
-startup. Request payloads do not configure filesystem mounts.
-
-The runtime requires an Apps SDK build providing `NetworkVolume`, `GlobalVolume`,
-and the worker mount-binding contract. Publish compatible SDK and runtime
-packages/images together before deploying apps with storage bindings.
+Apps provisioning supplies `RUNPOD_MOUNTS`, a JSON array of bindings with `kind`
+(`network` or `global`), declared `reference`, resolved volume `id`, and absolute
+`path`. Queue, API, and task workers install these before importing user code.
+The compatible Apps SDK's `volume.path` uses this worker-level map; request
+payloads cannot replace it. Missing configuration means no mounts; malformed
+configuration fails startup.
 
 ## Task cleanup
 
-The task watchdog deletes idle pods and pods with uncollected completed results
-after `RUNPOD_TASK_IDLE_TIMEOUT` (600 seconds by default). Active background jobs
-and inline executions are exempt, so intentional detached work can finish.
+The task watchdog checks `RUNPOD_TASK_DEADLINE` every 15 seconds. This absolute
+timestamp in Unix epoch seconds is set by the SDK and survives container restarts.
+Once reached, the runtime requests pod deletion even during active work or recent client
+contact. Without a deadline, only idle cleanup applies:
+`RUNPOD_TASK_IDLE_TIMEOUT` (600 seconds by default) reaps abandoned tasks and
+uncollected results, but exempts active background jobs and inline executions.
 
-Self-deletion requires the injected pod-scoped `RUNPOD_API_KEY` and
-`RUNPOD_POD_ID`. The runtime exits only after GraphQL acknowledges `podTerminate`
-without errors. Transient failures receive three bounded attempts; failed or
-unacknowledged deletion leaves the runtime alive for the next watchdog pass.
-Missing credentials and permanent errors are logged, not treated as deletion.
-Exiting or restarting a container alone does not stop pod billing.
-
-The task's `terminateAfter` backstop requires control-plane persistence and
-expiry enforcement. The idle watchdog does not impose a second deadline on
-active detached work.
+Self-deletion requires `RUNPOD_API_KEY` and `RUNPOD_POD_ID`. The runtime exits
+only after GraphQL acknowledges `podTerminate` without errors. Transient
+failures receive three bounded attempts; any failed deletion leaves the runtime
+alive for the next watchdog pass. Container exit alone does not stop pod billing.
 
 ## Development
 

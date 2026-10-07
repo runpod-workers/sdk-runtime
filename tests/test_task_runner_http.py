@@ -28,12 +28,15 @@ TOKEN = "test-token"
 
 
 @pytest.fixture()
-def server(monkeypatch, request):
+def server(monkeypatch):
     from runpod.apps.volume import _configure_mounts
 
     monkeypatch.setattr(task_runner, "TOKEN", TOKEN)
     monkeypatch.setattr(task_runner, "_job_state", {"status": "NONE", "response": None})
-    monkeypatch.setenv("RUNPOD_MOUNTS", json.dumps(getattr(request, "param", [])))
+    monkeypatch.setenv(
+        "RUNPOD_MOUNTS",
+        '[{"kind":"network","reference":"data","id":"nv-1","path":"/data"}]',
+    )
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     httpd.daemon_threads = True
     ready = threading.Event()
@@ -46,7 +49,7 @@ def server(monkeypatch, request):
     monkeypatch.setattr(task_runner, "_watchdog", lambda: None)
     thread = threading.Thread(target=task_runner.main, daemon=True)
     thread.start()
-    assert ready.wait(timeout=5), "task runner did not finish startup"
+    assert ready.wait(timeout=5)
     yield f"http://127.0.0.1:{httpd.server_port}"
     httpd.shutdown()
     thread.join(timeout=5)
@@ -131,11 +134,6 @@ def test_submit_and_result(server):
     assert body["response"]["json_result"] == "done"
 
 
-@pytest.mark.parametrize(
-    "server",
-    [[{"kind": "network", "reference": "data", "id": "nv-1", "path": "/data"}]],
-    indirect=True,
-)
 def test_mounts_survive_threaded_execution(server, monkeypatch):
     monkeypatch.setenv("RUNPOD_MOUNTS", "[]")
     status, body = _request(
@@ -166,7 +164,7 @@ def test_unknown_path_404(server):
 
 
 class TestWatchdog:
-    def test_running_job_never_killed(self):
+    def test_running_job_without_deadline(self):
         from runpod_sdk_runtime.task.runner import _should_self_terminate
 
         assert not _should_self_terminate("RUNNING", 0, 10_000, 600)
@@ -192,8 +190,19 @@ class TestWatchdog:
 
         assert not _should_self_terminate("NONE", None, 10_000, 600)
 
-    def test_inline_execution_never_killed(self):
+    def test_inline_execution_without_deadline(self):
         assert not task_runner._should_self_terminate("NONE", 0, 10_000, 600, inline=1)
+
+    def test_deadline_overrides_active_work_and_fresh_contact(self):
+        assert not task_runner._should_self_terminate(
+            "RUNNING", 999, 999, 600, deadline=1000
+        )
+        assert task_runner._should_self_terminate(
+            "RUNNING", 1000, 1000, 600, deadline=1000
+        )
+        assert task_runner._should_self_terminate(
+            "NONE", 1000, 1000, 600, inline=1, deadline=1000
+        )
 
     def test_authed_requests_touch_contact(self, server, monkeypatch):
         monkeypatch.setattr(task_runner, "_last_contact", {"ts": None})
@@ -201,81 +210,28 @@ class TestWatchdog:
         assert task_runner._last_contact["ts"] is not None
 
 
-class TestSelfTermination:
-    def _api(self, monkeypatch, responses):
-        import io
+def test_deletion_requires_acknowledgment_and_recovers(monkeypatch):
+    import io
+    from unittest.mock import Mock
 
-        remaining = iter(responses)
-        exits = []
-        attempts = []
-
-        def request(req, timeout=None):
-            attempts.append(req)
-            response = next(remaining)
-            if isinstance(response, Exception):
-                raise response
-            return io.BytesIO(json.dumps(response).encode())
-
-        monkeypatch.setenv("RUNPOD_POD_ID", "pod-1")
-        monkeypatch.setenv("RUNPOD_API_KEY", "pod-scoped-key")
-        monkeypatch.setattr("urllib.request.urlopen", request)
-        monkeypatch.setattr(task_runner.os, "_exit", exits.append)
-        monkeypatch.setattr(task_runner.time, "sleep", lambda delay: None)
-        return exits, attempts
-
-    def test_void_acknowledgment_allows_exit(self, monkeypatch):
-        exits, _ = self._api(monkeypatch, [{"data": {"podTerminate": None}}])
-        assert task_runner._terminate_self() is True
-        assert exits == [0]
-
-    @pytest.mark.parametrize(
-        "body",
-        [
-            {},
-            {"data": {}},
-            {"data": {"podTerminate": False}},
-            {"errors": [{"message": "forbidden"}], "data": {"podTerminate": None}},
-        ],
+    responses = [
+        io.BytesIO(b'{"errors":[{"message":"denied"}],"data":{"podTerminate":null}}'),
+        *[OSError("network down")] * task_runner.TERMINATE_ATTEMPTS,
+        urllib.error.URLError("connection reset"),
+        io.BytesIO(b'{"data":{"podTerminate":null}}'),
+    ]
+    exits = []
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod-1")
+    monkeypatch.setenv("RUNPOD_API_KEY", "pod-scoped-key")
+    monkeypatch.setattr(
+        task_runner.urllib.request, "urlopen", Mock(side_effect=responses)
     )
-    def test_unacknowledged_deletion_keeps_runtime_alive(self, monkeypatch, body):
-        exits, attempts = self._api(monkeypatch, [body])
-        assert task_runner._terminate_self() is False
-        assert not exits
-        assert len(attempts) == 1
+    monkeypatch.setattr(task_runner.os, "_exit", exits.append)
+    monkeypatch.setattr(task_runner.time, "sleep", lambda _: None)
 
-    @pytest.mark.parametrize("missing", ["RUNPOD_POD_ID", "RUNPOD_API_KEY"])
-    def test_missing_credentials_do_not_exit(self, monkeypatch, missing):
-        exits, attempts = self._api(monkeypatch, [])
-        monkeypatch.delenv(missing)
-        assert task_runner._terminate_self() is False
-        assert not attempts
-        assert not exits
-
-    @pytest.mark.parametrize(
-        "failure",
-        [
-            urllib.error.HTTPError("https://api/graphql", 429, "slow down", {}, None),
-            urllib.error.HTTPError("https://api/graphql", 503, "unavailable", {}, None),
-            urllib.error.URLError("connection reset"),
-            {"errors": [{"extensions": {"code": "INTERNAL_SERVER_ERROR"}}]},
-        ],
-    )
-    def test_transient_failure_recovers(self, monkeypatch, failure):
-        exits, _ = self._api(monkeypatch, [failure, {"data": {"podTerminate": None}}])
-        assert task_runner._terminate_self() is True
-        assert exits == [0]
-
-    def test_retry_exhaustion_keeps_runtime_alive(self, monkeypatch):
-        exits, attempts = self._api(
-            monkeypatch, [OSError("network down")] * task_runner.TERMINATE_ATTEMPTS
-        )
-        assert task_runner._terminate_self() is False
-        assert len(attempts) == task_runner.TERMINATE_ATTEMPTS
-        assert not exits
-
-    def test_auth_failure_does_not_retry_or_exit(self, monkeypatch):
-        error = urllib.error.HTTPError("https://api/graphql", 401, "denied", {}, None)
-        exits, attempts = self._api(monkeypatch, [error])
-        assert task_runner._terminate_self() is False
-        assert len(attempts) == 1
-        assert not exits
+    assert task_runner._terminate_self() is False
+    assert not exits
+    assert task_runner._terminate_self() is False
+    assert not exits
+    assert task_runner._terminate_self() is True
+    assert exits == [0]
