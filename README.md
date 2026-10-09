@@ -38,6 +38,27 @@ python -m runpod_sdk_runtime.task.runner
 
 `RUNPOD_RUNTIME_KIND` selects `queue` or `api` when running the shared bootstrap.
 
+## Storage bindings
+
+Apps provisioning supplies `RUNPOD_MOUNTS`, a JSON array of bindings with `kind`
+(`network` or `global`), declared `reference`, resolved volume `id`, and absolute
+`path`. Queue, API, and task workers install these before importing user code.
+The compatible Apps SDK's `volume.path` uses this worker-level map; request
+payloads cannot replace it. Missing configuration means no mounts; malformed
+configuration fails startup.
+
+## Task cleanup
+
+Active background jobs and inline executions can run indefinitely, including
+after the client disconnects. The watchdog checks for idle cleanup every 15
+seconds. `RUNPOD_TASK_IDLE_TIMEOUT` (600 seconds by default) applies only to
+pods waiting for submission or holding uncollected results.
+
+Self-deletion requires `RUNPOD_API_KEY` and `RUNPOD_POD_ID`. The runtime exits
+only after GraphQL acknowledges `podTerminate` without errors. Transient
+failures receive three bounded attempts; any failed deletion leaves the runtime
+alive for the next watchdog pass. Container exit alone does not stop pod billing.
+
 ## Development
 
 Install the Apps SDK checkout first, then install this project:

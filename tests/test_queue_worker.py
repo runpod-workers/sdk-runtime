@@ -9,6 +9,16 @@ import pytest
 from runpod_sdk_runtime.queue import worker
 
 
+@pytest.fixture(autouse=True)
+def clean_mounts(monkeypatch):
+    from runpod.apps.volume import _configure_mounts
+
+    monkeypatch.delenv("RUNPOD_MOUNTS", raising=False)
+    _configure_mounts([])
+    yield
+    _configure_mounts([])
+
+
 class TestModeDetection:
     def test_resource_name_flash_env(self, monkeypatch):
         monkeypatch.setenv("FLASH_RESOURCE_NAME", "chat")
@@ -192,21 +202,20 @@ class TestConcurrency:
 
 
 class TestMain:
-    def test_live_mode(self, monkeypatch):
-        monkeypatch.delenv("FLASH_RESOURCE_NAME", raising=False)
-        monkeypatch.delenv("RUNPOD_RESOURCE_NAME", raising=False)
-        with patch("runpod.serverless.start") as start:
-            worker.main()
-        config = start.call_args[0][0]
-        assert config["handler"] is worker._live_handler
-
-    def test_deployed_mode(self, monkeypatch, tmp_path):
+    async def test_deployed_mode(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(
+            "RUNPOD_MOUNTS",
+            '[{"kind":"global","reference":"gv-1","id":"gv-1","path":"/shared"}]',
+        )
         module_src = (
             "import runpod\n"
+            "from runpod.apps.volume import GlobalVolume\n"
+            "imported = str(GlobalVolume('gv-1').path)\n"
             "app = runpod.App('t')\n"
             "@app.queue(name='greet', gpu='4090')\n"
-            "def greet(name: str):\n"
-            "    return f'hi {name}'\n"
+            "async def greet(name: str):\n"
+            "    yield {'name': name, 'imported': imported}\n"
+            "    yield {'mounted': str(GlobalVolume('gv-1').path)}\n"
         )
         (tmp_path / "user_mod_c.py").write_text(module_src)
         (tmp_path / worker.MANIFEST_NAME).write_text(
@@ -218,25 +227,27 @@ class TestMain:
         with patch("runpod.serverless.start") as start:
             worker.main()
         handler = start.call_args[0][0]["handler"]
-        assert inspect.iscoroutinefunction(handler)
+        chunks = [chunk async for chunk in handler({"input": {"name": "reader"}})]
+        assert chunks == [
+            {"name": "reader", "imported": "/shared"},
+            {"mounted": "/shared"},
+        ]
 
-    async def test_live_handler_plain_function(self):
-        def fn(x):
-            return {"ok": x}
-
-        with (
-            patch(
-                "runpod_sdk_runtime.executor.resolve_request",
-                return_value=((fn, [1], {}), None),
-            ),
-            patch(
-                "runpod_sdk_runtime.executor.execute_request",
-                return_value={"success": True, "json_result": {"ok": 1}},
-            ) as execute,
-        ):
-            chunks = [c async for c in worker._live_handler({"input": {"foo": 1}})]
-        assert chunks == [{"success": True, "json_result": {"ok": 1}}]
-        execute.assert_called_once_with({"foo": 1})
+    async def test_live_mode(self, monkeypatch):
+        monkeypatch.delenv("FLASH_RESOURCE_NAME", raising=False)
+        monkeypatch.delenv("RUNPOD_RESOURCE_NAME", raising=False)
+        with patch("runpod.serverless.start") as start:
+            worker.main()
+        handler = start.call_args[0][0]["handler"]
+        request = {
+            "function_name": "echo",
+            "function_code": "def echo(x):\n    return {'ok': x}",
+            "args": [1],
+            "serialization_format": "json",
+        }
+        chunks = [chunk async for chunk in handler({"input": request})]
+        assert chunks[0]["success"] is True
+        assert chunks[0]["json_result"] == {"ok": 1}
 
     async def test_live_handler_resolve_error(self):
         with patch(
