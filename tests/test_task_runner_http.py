@@ -8,6 +8,7 @@ serialization, stdout capture) is covered in test_executor.py.
 import base64
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -16,7 +17,7 @@ import cloudpickle
 import pytest
 
 from runpod_sdk_runtime.task import runner as task_runner
-from runpod_sdk_runtime.task.runner import Handler
+from runpod_sdk_runtime.task.runner import Handler, _watchdog
 
 # http.server's per-request sockets are collected lazily; the unraisable
 # checker flags them as ResourceWarnings non-deterministically
@@ -33,6 +34,8 @@ def server(monkeypatch):
 
     monkeypatch.setattr(task_runner, "TOKEN", TOKEN)
     monkeypatch.setattr(task_runner, "_job_state", {"status": "NONE", "response": None})
+    monkeypatch.setattr(task_runner, "_execution_deadline", None)
+    monkeypatch.setattr(task_runner, "_watchdog_wakeup", threading.Event())
     monkeypatch.setenv(
         "RUNPOD_MOUNTS",
         '[{"kind":"network","reference":"data","id":"nv-1","path":"/data"}]',
@@ -161,6 +164,127 @@ def test_unknown_path_404(server):
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         _request(f"{server}/nope")
     assert exc_info.value.code == 404
+
+
+@pytest.mark.parametrize("path", ["submit", "execute", "timeout"])
+@pytest.mark.parametrize("timeout", [-1, True, "60", float("nan"), float("inf")])
+def test_invalid_timeout_is_rejected(server, path, timeout):
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _request(f"{server}/{path}", method="POST", body={"timeout": timeout})
+    assert exc_info.value.code == 400
+    assert task_runner._execution_deadline is None
+
+
+def test_timeout_requires_auth(server):
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        _request(f"{server}/timeout", method="POST", body={"timeout": 0}, token="wrong")
+    assert exc_info.value.code == 401
+    assert task_runner._execution_deadline is None
+
+
+def test_timeout_cannot_be_extended_by_requests(server):
+    start = time.monotonic()
+    _request(f"{server}/timeout", method="POST", body={"timeout": 60})
+    deadline = task_runner._execution_deadline
+    assert start + 60 <= deadline <= time.monotonic() + 60
+    _request(f"{server}/timeout", method="POST", body={"timeout": 600})
+    _request(f"{server}/timeout", method="POST", body={"timeout": None})
+    _request(f"{server}/result")
+    assert task_runner._execution_deadline == deadline
+    _request(f"{server}/timeout", method="POST", body={"timeout": 0})
+    assert task_runner._execution_deadline < deadline
+
+
+@pytest.mark.parametrize("path", ["submit", "execute"])
+def test_execution_timeout_is_armed_before_user_code(server, monkeypatch, path):
+    deadlines = []
+    entered = threading.Event()
+
+    def execute(request):
+        deadlines.append(task_runner._execution_deadline)
+        entered.set()
+        return {"success": True, "json_result": 42}
+
+    monkeypatch.setattr(task_runner, "execute_request", execute)
+    start = time.monotonic()
+    status, body = _request(f"{server}/{path}", method="POST", body={"timeout": 60})
+    assert status == 200
+    if path == "submit":
+        assert body["timeout"] == 60
+    assert entered.wait(2)
+    assert deadlines and start + 60 <= deadlines[0] <= time.monotonic() + 60
+
+
+@pytest.mark.parametrize("mode", ["submit", "wait"])
+def test_timeout_survives_client_exit(server, monkeypatch, mode):
+    release = threading.Event()
+    finished = threading.Event()
+    terminated = threading.Event()
+
+    def execute(request):
+        try:
+            release.wait(5)
+            return {"success": True, "json_result": 42}
+        finally:
+            finished.set()
+
+    def terminate():
+        terminated.set()
+        raise SystemExit
+
+    def watchdog():
+        try:
+            _watchdog()
+        except SystemExit:
+            return
+
+    monkeypatch.setattr(task_runner, "execute_request", execute)
+    monkeypatch.setattr(task_runner, "_terminate_self", terminate)
+    thread = threading.Thread(target=watchdog, daemon=True)
+    try:
+        if mode == "submit":
+            _request(f"{server}/submit", method="POST", body={"timeout": 0.2})
+        else:
+            _request(f"{server}/submit", method="POST", body={})
+            _request(f"{server}/timeout", method="POST", body={"timeout": 0.2})
+        assert task_runner._job_state["status"] == "RUNNING"
+        thread.start()
+        assert terminated.wait(2)
+    finally:
+        release.set()
+        if thread.ident is not None:
+            thread.join(timeout=2)
+        assert finished.wait(2)
+
+
+@pytest.mark.parametrize("status,inline", [("RUNNING", 0), ("NONE", 1), ("DONE", 0)])
+def test_watchdog_enforces_deadline_despite_recent_contact(monkeypatch, status, inline):
+    monkeypatch.setattr(task_runner, "_execution_deadline", 10)
+    monkeypatch.setattr(task_runner, "_job_state", {"status": status})
+    monkeypatch.setattr(task_runner, "_inline_executions", {"count": inline})
+    monkeypatch.setattr(task_runner, "_last_contact", {"ts": 10})
+    monkeypatch.setattr(task_runner.time, "monotonic", lambda: 10)
+
+    def terminate():
+        raise SystemExit
+
+    monkeypatch.setattr(task_runner, "_terminate_self", terminate)
+    with pytest.raises(SystemExit):
+        _watchdog()
+
+
+def test_expired_deadline_retries_failed_deletion(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(task_runner, "_execution_deadline", 0)
+    monkeypatch.setattr(task_runner, "_job_state", {"status": "RUNNING"})
+    monkeypatch.setattr(task_runner, "_watchdog_wakeup", Mock())
+    terminate = Mock(side_effect=[False, SystemExit])
+    monkeypatch.setattr(task_runner, "_terminate_self", terminate)
+    with pytest.raises(SystemExit):
+        _watchdog()
+    assert terminate.call_count == 2
+    assert task_runner._execution_deadline == 0
 
 
 class TestWatchdog:

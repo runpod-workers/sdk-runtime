@@ -20,6 +20,7 @@ the runtime package provides the shared executor alongside this server.
 """
 
 import json
+import math
 import os
 import sys
 import threading
@@ -46,12 +47,23 @@ _job_state = {"status": "NONE", "response": None}
 _last_contact = {"ts": None}  # set at server start
 # inline requests are protected from idle cleanup while running.
 _inline_executions = {"count": 0}
+_execution_deadline = None
+_watchdog_wakeup = threading.Event()
 
 
 def _touch_contact():
     import time
 
-    _last_contact["ts"] = time.time()
+    _last_contact["ts"] = time.monotonic()
+
+
+def _set_timeout(timeout):
+    global _execution_deadline
+    if timeout is not None:
+        deadline = time.monotonic() + timeout
+        if _execution_deadline is None or deadline < _execution_deadline:
+            _execution_deadline = deadline
+            _watchdog_wakeup.set()
 
 
 def _should_self_terminate(status, last_contact, now, idle_timeout, inline=0):
@@ -142,16 +154,22 @@ def _watchdog():
     import time
 
     while True:
-        time.sleep(WATCHDOG_INTERVAL)
         with _job_lock:
-            if _should_self_terminate(
+            now = time.monotonic()
+            expired = _execution_deadline is not None and now >= _execution_deadline
+            if expired or _should_self_terminate(
                 _job_state["status"],
                 _last_contact["ts"],
-                time.time(),
+                now,
                 IDLE_TIMEOUT,
                 inline=_inline_executions["count"],
             ):
                 _terminate_self()
+            delay = WATCHDOG_INTERVAL
+            if _execution_deadline is not None and _execution_deadline > now:
+                delay = min(delay, _execution_deadline - now)
+            _watchdog_wakeup.clear()
+        _watchdog_wakeup.wait(delay)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -198,21 +216,47 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             self._send(401, {"error": "unauthorized"})
             return
+        if self.path not in ("/execute", "/submit", "/timeout"):
+            self._send(404, {"error": "not found"})
+            return
+        try:
+            request = self._read_request()
+        except (ValueError, TypeError):
+            self._send(400, {"error": "invalid request"})
+            return
+        if not isinstance(request, dict):
+            self._send(400, {"error": "invalid request"})
+            return
+        timeout = request.get("timeout")
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            self._send(400, {"error": "timeout must be a finite non-negative number"})
+            return
+        if self.path == "/timeout":
+            with _job_lock:
+                _set_timeout(timeout)
+            self._send(200, {"timeout": timeout})
+            return
         if self.path == "/execute":
             with _job_lock:
+                _set_timeout(timeout)
                 _inline_executions["count"] += 1
             try:
-                self._send(200, execute_request(self._read_request()))
+                self._send(200, execute_request(request))
             finally:
                 with _job_lock:
                     _inline_executions["count"] -= 1
             return
         if self.path == "/submit":
-            request = self._read_request()
             with _job_lock:
                 if _job_state["status"] == "RUNNING":
                     self._send(409, {"error": "a job is already running"})
                     return
+                _set_timeout(timeout)
                 _job_state["status"] = "RUNNING"
                 _job_state["response"] = None
 
@@ -223,9 +267,11 @@ class Handler(BaseHTTPRequestHandler):
                     _job_state["response"] = response
 
             threading.Thread(target=run, daemon=True).start()
-            self._send(200, {"status": "RUNNING"})
+            response = {"status": "RUNNING"}
+            if timeout is not None:
+                response["timeout"] = timeout
+            self._send(200, response)
             return
-        self._send(404, {"error": "not found"})
 
     def log_message(self, format, *args):  # noqa: A002 - stdlib signature
         # request logging is noise in container logs (dev sessions
