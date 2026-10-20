@@ -13,18 +13,30 @@ from runpod_sdk_runtime.api import server
 
 
 @pytest.fixture(autouse=True)
-def clean_registry():
+def clean_registry(monkeypatch):
+    from runpod.apps.volume import _configure_mounts
+
+    monkeypatch.delenv("RUNPOD_MOUNTS", raising=False)
+    _configure_mounts([])
     _clear_registry()
     yield
     _clear_registry()
+    _configure_mounts([])
 
 
 def _write_project(tmp_path, monkeypatch, module="main_cls"):
+    monkeypatch.setenv(
+        "RUNPOD_MOUNTS",
+        '[{"kind":"network","reference":"data","id":"nv-1","path":"/data"}]',
+    )
     (tmp_path / f"{module}.py").write_text(
         textwrap.dedent(
             """
             import runpod
             from runpod import App, init, get, post
+            from runpod.apps.volume import NetworkVolume
+            volume = NetworkVolume("data")
+            imported = str(volume.path)
 
             app = App("api-test")
 
@@ -33,10 +45,14 @@ def _write_project(tmp_path, monkeypatch, module="main_cls"):
                 @init
                 def setup(self):
                     self.model = "loaded"
+                    self.mounted = [imported, str(volume.path)]
 
                 @get("/health")
                 def health(self):
-                    return {"model": self.model}
+                    return {
+                        "model": self.model,
+                        "mounts": self.mounted + [str(volume.path)],
+                    }
 
                 @post("/generate")
                 async def generate(self, body: dict):
@@ -79,7 +95,7 @@ class TestDeployedClassApi:
             assert response.json() == {"status": "healthy"}
 
             response = client.get("/health")
-            assert response.json() == {"model": "loaded"}
+            assert response.json() == {"model": "loaded", "mounts": ["/data"] * 3}
 
             response = client.post("/generate", json={"prompt": "hi"})
             assert response.json() == {

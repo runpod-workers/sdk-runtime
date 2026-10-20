@@ -29,6 +29,8 @@ import os
 import sys
 from typing import Any, Optional
 
+from runpod_sdk_runtime.mounts import configure_mounts
+
 log = logging.getLogger("runpod_sdk_runtime.api")
 
 APP_DIR = os.environ.get("RUNPOD_APP_DIR", "/app")
@@ -293,6 +295,7 @@ def _build_live_app() -> Any:
 
 
 def build_app() -> Any:
+    configure_mounts()
     if _is_deployed():
         handle = _load_api_handle()
         if handle._cls is not None:

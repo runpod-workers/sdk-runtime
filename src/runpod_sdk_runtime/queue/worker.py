@@ -24,6 +24,8 @@ import sys
 
 import runpod
 
+from runpod_sdk_runtime.mounts import configure_mounts
+
 APP_DIR = os.environ.get("RUNPOD_APP_DIR", "/app")
 MANIFEST_NAME = "runpod_manifest.json"
 
@@ -173,6 +175,7 @@ def _worker_config(handler) -> dict:
 
 
 def main() -> None:
+    configure_mounts()
     if _is_deployed():
         handle = _load_deployed_handle()
         _run_init(handle)
