@@ -116,7 +116,7 @@ def _terminate_self():
         )
         return False
     api_base = os.environ.get("RUNPOD_API_BASE_URL", "https://api.runpod.io")
-    task = os.environ.get("RUNPOD_FLASH_TASK") == "1"
+    task = os.environ.get("RUNPOD_RUNTIME_KIND") == "task"
     mutation = "flashTaskTerminate" if task else "podTerminate"
     input_type = "FlashTaskTerminateInput" if task else "PodTerminateInput"
     payload = json.dumps(
@@ -361,7 +361,7 @@ def main(bootstrap_error=None) -> None:
     _ready = False
     _deployed_handle = None
     _timeout_cap = None
-    _production = deployed.is_deployed()
+    _production = os.environ.get("RUNPOD_RUNTIME_KIND") == "task"
 
     def initialize():
         global _ready, _bootstrap_error, _deployed_handle, _timeout_cap

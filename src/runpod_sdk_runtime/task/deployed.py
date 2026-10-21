@@ -9,14 +9,6 @@ from runpod_sdk_runtime import bootstrap
 from runpod_sdk_runtime.executor import _run_awaitable, execute_request
 
 
-def is_deployed():
-    return (
-        os.environ.get("RUNPOD_FLASH_TASK") == "1"
-        or os.environ.get("RUNPOD_RUNTIME_KIND") == "task"
-        or os.environ.get("RUNPOD_FLASH_PROTOCOL") == "1"
-    )
-
-
 def load_handle():
     bootstrap._validate_task_environment()
     app_dir = os.environ.get("RUNPOD_APP_DIR", "/app")

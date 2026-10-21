@@ -92,20 +92,13 @@ def _resource_name():
 
 
 def _validate_task_environment():
-    required = {
-        "RUNPOD_FLASH_PROTOCOL": "1",
-        "RUNPOD_FLASH_TASK": "1",
-        "RUNPOD_RUNTIME_KIND": "task",
-    }
-    for key, value in required.items():
-        if os.environ.get(key) != value:
-            raise PhaseError("identity", f"{key} must be {value}")
+    if _runtime_kind() != "task":
+        raise PhaseError("identity", "RUNPOD_RUNTIME_KIND must be task")
     for key in (
         "FLASH_APP_NAME",
         "FLASH_ENVIRONMENT",
         "FLASH_RESOURCE_NAME",
         "RUNPOD_BUILD_ID",
-        "FLASH_BUILD_ARTIFACT_PATH",
     ):
         if not os.environ.get(key, "").strip():
             raise PhaseError("identity", f"{key} is required for deployed tasks")
@@ -138,19 +131,14 @@ def _task_resource(manifest):
 
 def _locate():
     """return the app tree root, unpacking the artifact if needed."""
-    task = os.environ.get("RUNPOD_FLASH_TASK") == "1"
-    if not task and PREBUILT_APP_DIR and os.path.isdir(PREBUILT_APP_DIR):
+    if PREBUILT_APP_DIR and os.path.isdir(PREBUILT_APP_DIR):
         _log(f"using pre-unpacked app tree at {PREBUILT_APP_DIR}")
         return PREBUILT_APP_DIR
 
     marker = os.path.join(APP_DIR, UNPACK_MARKER)
     if os.path.isfile(marker):
-        with open(marker) as f:
-            identity = f.read()
-        if not task or identity == ARTIFACT_PATH:
-            _log(f"app tree already unpacked at {APP_DIR}")
-            return APP_DIR
-        raise PhaseError("locate", "unpacked app tree belongs to another artifact")
+        _log(f"app tree already unpacked at {APP_DIR}")
+        return APP_DIR
 
     deadline = time.monotonic() + ARTIFACT_WAIT_SECONDS
     while not os.path.isfile(ARTIFACT_PATH):
@@ -197,7 +185,7 @@ def _locate():
         raise PhaseError("locate", f"failed to extract artifact: {exc}")
 
     with open(marker, "w") as f:
-        f.write(ARTIFACT_PATH if task else str(time.time()))
+        f.write(str(time.time()))
     _log(f"artifact extracted to {APP_DIR} in {time.monotonic() - started:.1f}s")
     return APP_DIR
 
@@ -450,7 +438,7 @@ def _api_error_server(error):
 
 def _report_error(error):
     _log(f"FAILED {error}")
-    if _runtime_kind() == "task" or os.environ.get("RUNPOD_FLASH_TASK") == "1":
+    if _runtime_kind() == "task":
         from runpod_sdk_runtime.task.runner import main as task_main
 
         task_main(bootstrap_error=_error_payload(error))
@@ -465,7 +453,7 @@ def _report_error(error):
 
 def main():
     try:
-        task = _runtime_kind() == "task" or os.environ.get("RUNPOD_FLASH_TASK") == "1"
+        task = _runtime_kind() == "task"
         if task:
             _validate_task_environment()
         if _resource_name():

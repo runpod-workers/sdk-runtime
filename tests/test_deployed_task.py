@@ -50,8 +50,6 @@ async def initialize():
     }
     (tmp_path / bootstrap.MANIFEST_NAME).write_text(json.dumps(manifest))
     for key, value in {
-        "RUNPOD_FLASH_PROTOCOL": "1",
-        "RUNPOD_FLASH_TASK": "1",
         "RUNPOD_RUNTIME_KIND": "task",
         "RUNPOD_BUILD_ID": "build-1",
         "FLASH_APP_NAME": "example",
@@ -246,14 +244,11 @@ def test_init_failure_has_task_error_surface(start_server, monkeypatch):
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("RUNPOD_FLASH_PROTOCOL", "0"),
-        ("RUNPOD_FLASH_TASK", "0"),
         ("RUNPOD_RUNTIME_KIND", "queue"),
         ("FLASH_APP_NAME", ""),
         ("FLASH_RESOURCE_NAME", ""),
         ("FLASH_ENVIRONMENT", ""),
         ("RUNPOD_BUILD_ID", ""),
-        ("FLASH_BUILD_ARTIFACT_PATH", ""),
     ],
 )
 def test_invalid_production_identity_never_falls_back(
@@ -299,8 +294,7 @@ def test_manifest_qualname_resolves_class_attribute(artifact):
 def test_production_mode_cannot_fall_back_after_startup(start_server, monkeypatch):
     url = start_server()
     assert wait_ready(url)[0] == 200
-    for key in ("RUNPOD_FLASH_TASK", "RUNPOD_FLASH_PROTOCOL", "RUNPOD_RUNTIME_KIND"):
-        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("RUNPOD_RUNTIME_KIND")
     assert (
         request(
             url + "/execute",
@@ -362,7 +356,13 @@ def test_deployed_execution_never_resolves_source_or_pickle(artifact, monkeypatc
 
 
 def test_source_execution_ignores_production_policy_cap(start_server, monkeypatch):
-    for key in ("RUNPOD_FLASH_TASK", "RUNPOD_FLASH_PROTOCOL", "RUNPOD_RUNTIME_KIND"):
+    for key in (
+        "RUNPOD_RUNTIME_KIND",
+        "RUNPOD_BUILD_ID",
+        "FLASH_APP_NAME",
+        "FLASH_ENVIRONMENT",
+        "FLASH_RESOURCE_NAME",
+    ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS", "invalid")
     url = start_server()
@@ -385,7 +385,7 @@ def test_source_execution_ignores_production_policy_cap(start_server, monkeypatc
     "result,expected", [(True, True), (False, False), (None, False)]
 )
 def test_production_self_termination_uses_pod_auth(monkeypatch, result, expected):
-    monkeypatch.setenv("RUNPOD_FLASH_TASK", "1")
+    monkeypatch.setenv("RUNPOD_RUNTIME_KIND", "task")
     monkeypatch.setenv("RUNPOD_POD_ID", "pod-1")
     monkeypatch.setenv("RUNPOD_API_KEY", "internal-key")
     response = io.BytesIO(json.dumps({"data": {"flashTaskTerminate": result}}).encode())
@@ -405,8 +405,7 @@ def test_production_self_termination_uses_pod_auth(monkeypatch, result, expected
 
 
 def test_task_bootstrap_error_never_enters_queue_loop(monkeypatch):
-    monkeypatch.setenv("RUNPOD_FLASH_TASK", "1")
-    monkeypatch.setenv("RUNPOD_RUNTIME_KIND", "queue")
+    monkeypatch.setenv("RUNPOD_RUNTIME_KIND", "task")
     main = Mock()
     queue = Mock()
     monkeypatch.setattr(runner, "main", main)
@@ -416,24 +415,27 @@ def test_task_bootstrap_error_never_enters_queue_loop(monkeypatch):
     assert main.call_args.kwargs["bootstrap_error"]["error_type"] == "BootstrapError"
 
 
-def test_production_bootstrap_requires_exact_archive(artifact, monkeypatch):
+def test_production_bootstrap_uses_prebuilt_app(artifact, monkeypatch):
     path, _ = artifact
     prebuilt = path / "prebuilt"
     prebuilt.mkdir()
     monkeypatch.setattr(bootstrap, "PREBUILT_APP_DIR", str(prebuilt))
-    monkeypatch.setattr(bootstrap, "ARTIFACT_PATH", str(path / "build-specific.tar.gz"))
+    monkeypatch.setattr(bootstrap, "ARTIFACT_PATH", str(path / "artifact.tar.gz"))
     monkeypatch.setattr(bootstrap, "APP_DIR", str(path / "app"))
     monkeypatch.setattr(bootstrap, "ARTIFACT_WAIT_SECONDS", 0)
-    with pytest.raises(bootstrap.PhaseError, match="artifact not found"):
-        bootstrap._locate()
+    assert bootstrap._locate() == str(prebuilt)
 
 
-def test_production_bootstrap_rejects_other_artifact_marker(artifact, monkeypatch):
+def test_production_bootstrap_reuses_unpacked_app(artifact, monkeypatch):
     path, _ = artifact
-    (path / bootstrap.UNPACK_MARKER).write_text("other-build")
+    (path / bootstrap.UNPACK_MARKER).write_text(str(time.time()))
     monkeypatch.setattr(bootstrap, "APP_DIR", str(path))
-    with pytest.raises(bootstrap.PhaseError, match="another artifact"):
-        bootstrap._locate()
+    assert bootstrap._locate() == str(path)
+
+
+def test_task_identity_accepts_host_artifact_path(artifact, monkeypatch):
+    monkeypatch.delenv("FLASH_BUILD_ARTIFACT_PATH")
+    bootstrap._validate_task_environment()
 
 
 @pytest.mark.parametrize("contents", ["{bad", "[]", '{"app":"wrong"}'])

@@ -42,11 +42,12 @@ shared bootstrap. Source-mode tasks start through `runpod_sdk_runtime.task.runne
 ## Deployed tasks
 
 The control plane starts production task pods through the shared bootstrap with
-`RUNPOD_FLASH_PROTOCOL=1`, `RUNPOD_FLASH_TASK=1`, and `RUNPOD_RUNTIME_KIND=task`.
+`RUNPOD_RUNTIME_KIND=task`.
 `RUNPOD_BUILD_ID`, `FLASH_APP_NAME`, `FLASH_ENVIRONMENT`, and `FLASH_RESOURCE_NAME`
-identify the selected build and resource. `FLASH_BUILD_ARTIFACT_PATH` points to its
-build-specific archive. The bootstrap extracts that archive and attaches its
-vendored environment. The runner validates the manifest app, resource name, and
+identify the selected build and resource. The host delivers the environment's
+active artifact at `/root/.runpod/artifact.tar.gz` on its read-only mount. The
+bootstrap waits for that archive, extracts it and attaches its vendored
+environment. The runner validates the manifest app, resource name, and
 task kind, then imports the registered function and runs its init hook.
 
 `GET /ping` reports readiness only after initialization succeeds. Bootstrap and
