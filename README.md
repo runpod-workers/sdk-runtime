@@ -36,7 +36,28 @@ python -m runpod_sdk_runtime.bootstrap
 python -m runpod_sdk_runtime.task.runner
 ```
 
-`RUNPOD_RUNTIME_KIND` selects `queue` or `api` when running the shared bootstrap.
+`RUNPOD_RUNTIME_KIND` selects `queue`, `api`, or deployed `task` when running the
+shared bootstrap. Source-mode tasks start through `runpod_sdk_runtime.task.runner`.
+
+## Deployed tasks
+
+The control plane starts production task pods through the shared bootstrap with
+`RUNPOD_FLASH_PROTOCOL=1`, `RUNPOD_FLASH_TASK=1`, and `RUNPOD_RUNTIME_KIND=task`.
+`RUNPOD_BUILD_ID`, `FLASH_APP_NAME`, `FLASH_ENVIRONMENT`, and `FLASH_RESOURCE_NAME`
+identify the selected build and resource. `FLASH_BUILD_ARTIFACT_PATH` points to its
+build-specific archive. The bootstrap extracts that archive and attaches its
+vendored environment. The runner validates the manifest app, resource name, and
+task kind, then imports the registered function and runs its init hook.
+
+`GET /ping` reports readiness only after initialization succeeds. Bootstrap and
+initialization failures return a structured `BootstrapError`; task pods do not
+consume serverless queue jobs. `RUNPOD_TASK_TOKEN` authenticates `/submit`, `/result`,
+`/execute`, and `/timeout` on `RUNPOD_TASK_PORT` (8080 by default).
+
+Production execution accepts JSON `args` and `kwargs`, with an optional transport
+`timeout`. Results use `json_result`, with captured `stdout` and the shared error
+envelope. Requests cannot supply source, dependencies, mounts, or pickle
+serialization. Source-mode tasks use the shared live executor.
 
 ## Storage bindings
 
@@ -49,13 +70,21 @@ configuration fails startup.
 
 ## Task cleanup
 
-Active background jobs and inline executions can run indefinitely, including
-after the client disconnects. The watchdog checks for idle cleanup every 15
+Active background jobs and inline executions can run indefinitely when no
+execution timeout is configured, including after the client disconnects. The
+watchdog checks for idle cleanup every 15
 seconds. `RUNPOD_TASK_IDLE_TIMEOUT` (600 seconds by default) applies only to
 pods waiting for submission or holding uncollected results.
 
-Self-deletion requires `RUNPOD_API_KEY` and `RUNPOD_POD_ID`. The runtime exits
-only after GraphQL acknowledges `podTerminate` without errors. Transient
+`RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS` is an optional, finite positive production
+policy cap selected by the control plane. Its deadline starts at the first accepted
+execution. Request timeouts can shorten that deadline but cannot extend it. The
+watchdog enforces execution deadlines even while work is active.
+
+Self-deletion requires `RUNPOD_API_KEY` and `RUNPOD_POD_ID`. Production task pods
+call `flashTaskTerminate` with the internal pod key in `Authorization` and the pod ID
+in `X-RunPod-Pod-Id`; source-mode pods call `podTerminate`. The runtime exits
+only after GraphQL acknowledges deletion without errors. Transient
 failures receive three bounded attempts; any failed deletion leaves the runtime
 alive for the next watchdog pass. Container exit alone does not stop pod billing.
 

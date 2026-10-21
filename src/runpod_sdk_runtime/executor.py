@@ -102,12 +102,12 @@ def _deserialize_args(request):
     return args, kwargs
 
 
-def _serialize_result(result, fmt):
+def _serialize_result(result, fmt, *, allow_nan=True):
     if fmt == "json":
         # json-format requests promise json on the wire; failing here
         # keeps dev behavior identical to a deployed endpoint
         try:
-            json.dumps(result)
+            json.dumps(result, allow_nan=allow_nan)
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"return value must be json-serializable "
@@ -177,13 +177,15 @@ def serialize_chunk(chunk, request):
     return response
 
 
-def execute_request(request):
+def execute_request(request, *, prepared=None):
     """run one FunctionRequest to completion, returning a response dict."""
     stdout_io = io.StringIO()
+    strict_json = prepared is not None
     try:
-        prepared, error_response = resolve_request(request)
-        if error_response is not None:
-            return error_response
+        if prepared is None:
+            prepared, error_response = resolve_request(request)
+            if error_response is not None:
+                return error_response
         fn, args, kwargs = prepared
 
         # stdout is teed: captured for the job response and written
@@ -205,7 +207,9 @@ def execute_request(request):
         response = {"success": True, "stdout": stdout_io.getvalue()}
         response.update(
             _serialize_result(
-                result, request.get("serialization_format", "cloudpickle")
+                result,
+                request.get("serialization_format", "cloudpickle"),
+                allow_nan=not strict_json,
             )
         )
         return response
