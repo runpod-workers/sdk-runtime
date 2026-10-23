@@ -77,18 +77,16 @@ def _start_execution(timeout):
     _set_timeout(timeout)
 
 
-def _configured_timeout():
-    value = os.environ.get("RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS")
+def _configured_timeout(key="RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS", default=None):
+    value = os.environ.get(key)
     if value is None:
-        return None
+        return default
     try:
         timeout = float(value)
     except ValueError:
         timeout = float("nan")
     if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError(
-            "RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS must be finite and positive"
-        )
+        raise ValueError(f"{key} must be finite and positive")
     return timeout
 
 
@@ -377,20 +375,48 @@ def main(bootstrap_error=None) -> None:
         _touch_contact()
         threading.Thread(target=_watchdog, daemon=True).start()
 
+    initialization_done = threading.Event()
+
+    def watch_initialization():
+        global _bootstrap_error
+        while True:
+            remaining = init_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if initialization_done.wait(min(remaining, WATCHDOG_INTERVAL)):
+                return
+        with _job_lock:
+            if initialization_done.is_set():
+                return
+            _bootstrap_error = {
+                "error_type": "BootstrapError",
+                "error_message": "task initialization timed out",
+            }
+            initialization_done.set()
+        while not _terminate_self():
+            time.sleep(WATCHDOG_INTERVAL)
+
     def initialize():
         global _ready, _bootstrap_error, _deployed_handle, _timeout_cap
+        handle = None
+        error = None
         try:
             _timeout_cap = _configured_timeout()
             configure_mounts()
-            _deployed_handle = deployed.load_handle()
-            _ready = True
+            handle = deployed.load_handle()
         except Exception as exc:
-            _bootstrap_error = {
+            error = {
                 "error_type": "BootstrapError",
                 "error_message": f"task initialization failed: {exc}",
             }
-        finally:
-            start_watchdog()
+        with _job_lock:
+            if initialization_done.is_set() or time.monotonic() >= init_deadline:
+                return
+            _deployed_handle = handle
+            _bootstrap_error = error
+            _ready = error is None
+            initialization_done.set()
+        start_watchdog()
 
     if not _production and bootstrap_error is None:
         configure_mounts()
@@ -399,8 +425,19 @@ def main(bootstrap_error=None) -> None:
     initializer = None
     try:
         if _production and bootstrap_error is None:
-            initializer = threading.Thread(target=initialize, daemon=True)
-            initializer.start()
+            try:
+                init_timeout = _configured_timeout("RUNPOD_TASK_INIT_TIMEOUT", 600.0)
+            except ValueError as exc:
+                _bootstrap_error = {
+                    "error_type": "BootstrapError",
+                    "error_message": f"task initialization failed: {exc}",
+                }
+                start_watchdog()
+            else:
+                init_deadline = time.monotonic() + init_timeout
+                threading.Thread(target=watch_initialization, daemon=True).start()
+                initializer = threading.Thread(target=initialize, daemon=True)
+                initializer.start()
         else:
             start_watchdog()
         server.serve_forever()

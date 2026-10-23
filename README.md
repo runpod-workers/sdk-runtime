@@ -81,6 +81,14 @@ watchdog checks for idle cleanup every 15
 seconds. `RUNPOD_TASK_IDLE_TIMEOUT` (600 seconds by default) applies only to
 pods waiting for submission or holding uncollected results.
 
+`RUNPOD_TASK_INIT_TIMEOUT` bounds deployed task initialization, including storage
+setup, module imports, and init hooks. It defaults to 600 seconds and must be
+finite and positive. Initialization timeout produces a terminal `BootstrapError`
+and triggers pod deletion, with retries until deletion is acknowledged. Client
+contact cannot extend this deadline, and completion after timeout cannot make
+the pod ready. Idle monitoring begins after initialization succeeds or fails;
+the initialization deadline is independent of the execution timeout.
+
 `RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS` is an optional, finite positive production
 policy cap selected by the control plane. Its deadline starts at the first accepted
 execution. Request timeouts can shorten that deadline but cannot extend it. The

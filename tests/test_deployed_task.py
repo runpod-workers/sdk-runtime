@@ -783,3 +783,130 @@ def test_readiness_error_details_require_authenticated_route(
         assert response["ready"] is False
         assert response["error_type"] == "BootstrapError"
         assert detail in response["error_message"]
+
+
+@pytest.mark.parametrize("fails_late", [False, True])
+def test_hung_init_is_reaped_and_cannot_become_ready(
+    start_server, monkeypatch, fails_late
+):
+    entered, release, deleted = threading.Event(), threading.Event(), threading.Event()
+    initializers = []
+    calls = []
+
+    def load():
+        initializers.append(threading.current_thread())
+        entered.set()
+        assert release.wait(5)
+        if fails_late:
+            raise ValueError("late initialization failure")
+        return Mock()
+
+    def terminate():
+        calls.append(time.monotonic())
+        if len(calls) == 1:
+            return False
+        deleted.set()
+        return True
+
+    idle_watchdog = Mock()
+    monkeypatch.setenv("RUNPOD_TASK_INIT_TIMEOUT", "0.15")
+    monkeypatch.setattr(deployed, "load_handle", load)
+    monkeypatch.setattr(runner, "_terminate_self", terminate)
+    monkeypatch.setattr(runner, "_watchdog", idle_watchdog)
+    monkeypatch.setattr(runner, "WATCHDOG_INTERVAL", 0.01)
+    url = start_server()
+    try:
+        assert entered.wait(5)
+        assert request(url + "/submit", "POST", {})[0] == 503
+        assert wait_ready(url) == (
+            500,
+            {"ready": False, "error_type": "BootstrapError"},
+        )
+        assert deleted.wait(5)
+        assert len(calls) == 2
+        status, error = request(url + "/result")
+        assert status == 500
+        assert error["error_message"] == "task initialization timed out"
+        assert runner._execution_deadline is None
+    finally:
+        release.set()
+        for thread in initializers:
+            thread.join(5)
+            assert not thread.is_alive()
+    assert runner._ready is False
+    assert runner._deployed_handle is None
+    assert request(url + "/result") == (status, error)
+    idle_watchdog.assert_not_called()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("timeout", ["0.15", "1e300"])
+def test_completed_init_disarms_initialization_timeout(
+    start_server, monkeypatch, fails, timeout
+):
+    terminated = threading.Event()
+    monkeypatch.setenv("RUNPOD_TASK_INIT_TIMEOUT", timeout)
+    monkeypatch.setattr(runner, "_terminate_self", lambda: terminated.set() or True)
+    monkeypatch.setattr(
+        deployed,
+        "load_handle",
+        Mock(side_effect=ValueError("init failed"))
+        if fails
+        else Mock(return_value=Mock()),
+    )
+    url = start_server()
+    assert wait_ready(url)[0] == (500 if fails else 200)
+    assert not terminated.wait(0.3)
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "nan", "inf", "text"])
+def test_invalid_initialization_timeout_fails_before_loading(
+    start_server, monkeypatch, value
+):
+    load = Mock()
+    monkeypatch.setenv("RUNPOD_TASK_INIT_TIMEOUT", value)
+    monkeypatch.setattr(deployed, "load_handle", load)
+    url = start_server()
+    assert wait_ready(url)[0] == 500
+    status, error = request(url + "/result")
+    assert status == 500
+    assert (
+        "RUNPOD_TASK_INIT_TIMEOUT must be finite and positive" in error["error_message"]
+    )
+    load.assert_not_called()
+
+
+def test_initialization_timeout_defaults_independently_of_execution_cap(
+    start_server, monkeypatch
+):
+    configured = Mock(wraps=runner._configured_timeout)
+    monkeypatch.delenv("RUNPOD_TASK_INIT_TIMEOUT", raising=False)
+    monkeypatch.setenv("RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(runner, "_configured_timeout", configured)
+    assert wait_ready(start_server())[0] == 200
+    configured.assert_any_call("RUNPOD_TASK_INIT_TIMEOUT", 600.0)
+    assert runner._timeout_cap == 1
+    assert runner._execution_deadline is None
+
+
+def test_init_completion_after_deadline_waits_for_deletion(start_server, monkeypatch):
+    from types import SimpleNamespace
+
+    clock = Mock(return_value=0.0)
+    deleted = threading.Event()
+
+    def load():
+        clock.return_value = 1.0
+        return Mock()
+
+    monkeypatch.setenv("RUNPOD_TASK_INIT_TIMEOUT", "0.05")
+    monkeypatch.setattr(
+        runner, "time", SimpleNamespace(monotonic=clock, sleep=time.sleep)
+    )
+    monkeypatch.setattr(deployed, "load_handle", load)
+    monkeypatch.setattr(runner, "_terminate_self", lambda: deleted.set() or True)
+    url = start_server()
+    assert wait_ready(url)[0] == 500
+    assert deleted.wait(5)
+    assert runner._ready is False
+    assert runner._deployed_handle is None
