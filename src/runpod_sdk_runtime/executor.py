@@ -177,10 +177,11 @@ def serialize_chunk(chunk, request):
     return response
 
 
-def execute_request(request, *, prepared=None):
+def execute_request(request, *, prepared=None, run_awaitable=None):
     """run one FunctionRequest to completion, returning a response dict."""
     stdout_io = io.StringIO()
     strict_json = prepared is not None
+    await_result = run_awaitable or _run_awaitable
     try:
         if prepared is None:
             prepared, error_response = resolve_request(request)
@@ -196,13 +197,13 @@ def execute_request(request, *, prepared=None):
         with redirect_stdout(_Tee(stdout_io, sys.__stdout__)):
             result = fn(*args, **kwargs)
             if hasattr(result, "__await__"):
-                result = _run_awaitable(result)
+                result = await_result(result)
             # generators aggregate so live .remote() matches the
             # deployed worker's return_aggregate_stream output
             elif inspect.isgenerator(result):
                 result = list(result)
             elif inspect.isasyncgen(result):
-                result = _run_awaitable(_drain_async_gen(result))
+                result = await_result(_drain_async_gen(result))
 
         response = {"success": True, "stdout": stdout_io.getvalue()}
         response.update(

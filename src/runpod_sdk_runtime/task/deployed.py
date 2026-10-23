@@ -1,12 +1,64 @@
 """registered task loading and json-only execution."""
 
+import asyncio
 import importlib
+import inspect
 import json
 import os
 import sys
+import threading
 
 from runpod_sdk_runtime import bootstrap
-from runpod_sdk_runtime.executor import _run_awaitable, execute_request
+from runpod_sdk_runtime.executor import _await, execute_request
+
+_loop = None
+_loop_thread = None
+_loop_lock = threading.Lock()
+
+
+def _serve_loop(loop):
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_forever()
+    finally:
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(loop.shutdown_default_executor())
+        loop.close()
+
+
+def _run_awaitable(awaitable):
+    global _loop, _loop_thread
+    with _loop_lock:
+        if _loop is None:
+            _loop = asyncio.new_event_loop()
+            _loop_thread = threading.Thread(
+                target=_serve_loop, args=(_loop,), daemon=True
+            )
+            _loop_thread.start()
+        future = asyncio.run_coroutine_threadsafe(_await(awaitable), _loop)
+    return future.result()
+
+
+def close():
+    global _loop, _loop_thread
+    with _loop_lock:
+        if _loop is None:
+            return
+        _loop.call_soon_threadsafe(_loop.stop)
+        _loop_thread.join()
+        _loop = None
+        _loop_thread = None
+
+
+async def _initialize(handle):
+    result = handle._init_fn()
+    if inspect.isawaitable(result):
+        await result
 
 
 def load_handle():
@@ -36,11 +88,7 @@ def load_handle():
         raise RuntimeError("module must expose exactly one matching @app.task handle")
     handle = handles.pop()
     if handle._init_fn is not None:
-        import inspect
-
-        result = handle._init_fn()
-        if inspect.isawaitable(result):
-            _run_awaitable(result)
+        _run_awaitable(_initialize(handle))
     return handle
 
 
@@ -65,4 +113,5 @@ def execute(handle, request):
     return execute_request(
         {"serialization_format": "json"},
         prepared=(handle._fn, request.get("args", []), request.get("kwargs", {})),
+        run_awaitable=_run_awaitable,
     )

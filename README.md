@@ -50,8 +50,12 @@ bootstrap waits for that archive, extracts it and attaches its vendored
 environment. The runner validates the manifest app, resource name, and
 task kind, then imports the registered function and runs its init hook.
 
-`GET /ping` reports readiness only after initialization succeeds. Bootstrap and
-initialization failures return a structured `BootstrapError`; task pods do not
+`GET /ping` reports readiness only after initialization succeeds. Pending
+initialization returns HTTP 503 with `{"ready": false}`. Bootstrap and
+initialization failures return HTTP 500 with
+`{"ready": false, "error_type": "BootstrapError"}`. Error details are available
+through authenticated `GET /result`. Clients should treat the bootstrap failure
+as terminal and retrieve its details using the task token. Task pods do not
 consume serverless queue jobs. `RUNPOD_TASK_TOKEN` authenticates `/submit`, `/result`,
 `/execute`, and `/timeout` on `RUNPOD_TASK_PORT` (8080 by default).
 

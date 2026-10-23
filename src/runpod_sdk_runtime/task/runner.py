@@ -232,9 +232,10 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("invalid content length")
         return json.loads(self.rfile.read(length) or b"{}")
 
-    def _available(self):
+    def _available(self, *, public=False):
         if _bootstrap_error is not None:
-            self._send(500, {"ready": False, **_bootstrap_error})
+            error = {"error_type": "BootstrapError"} if public else _bootstrap_error
+            self._send(500, {"ready": False, **error})
             return False
         if not _ready:
             self._send(503, {"ready": False})
@@ -243,7 +244,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler api
         if self.path == "/ping":
-            if self._available():
+            if self._available(public=True):
                 self._send(200, {"ready": True})
             return
         if self.path == "/result":
@@ -361,7 +362,20 @@ def main(bootstrap_error=None) -> None:
     _ready = False
     _deployed_handle = None
     _timeout_cap = None
-    _production = os.environ.get("RUNPOD_RUNTIME_KIND") == "task"
+    _production = os.environ.get("RUNPOD_RUNTIME_KIND") == "task" or any(
+        key in os.environ
+        for key in (
+            "RUNPOD_BUILD_ID",
+            "FLASH_APP_NAME",
+            "FLASH_ENVIRONMENT",
+            "FLASH_RESOURCE_NAME",
+            "RUNPOD_RESOURCE_NAME",
+        )
+    )
+
+    def start_watchdog():
+        _touch_contact()
+        threading.Thread(target=_watchdog, daemon=True).start()
 
     def initialize():
         global _ready, _bootstrap_error, _deployed_handle, _timeout_cap
@@ -375,16 +389,26 @@ def main(bootstrap_error=None) -> None:
                 "error_type": "BootstrapError",
                 "error_message": f"task initialization failed: {exc}",
             }
+        finally:
+            start_watchdog()
 
     if not _production and bootstrap_error is None:
         configure_mounts()
         _ready = True
-    _touch_contact()
-    threading.Thread(target=_watchdog, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    if _production and bootstrap_error is None:
-        threading.Thread(target=initialize, daemon=True).start()
-    server.serve_forever()
+    initializer = None
+    try:
+        if _production and bootstrap_error is None:
+            initializer = threading.Thread(target=initialize, daemon=True)
+            initializer.start()
+        else:
+            start_watchdog()
+        server.serve_forever()
+    finally:
+        if initializer is not None:
+            initializer.join()
+        server.server_close()
+        deployed.close()
 
 
 if __name__ == "__main__":

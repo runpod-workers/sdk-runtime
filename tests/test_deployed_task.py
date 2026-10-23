@@ -235,6 +235,9 @@ def test_init_failure_has_task_error_surface(start_server, monkeypatch):
     assert status == 500
     assert body["ready"] is False
     assert body["error_type"] == "BootstrapError"
+    assert "error_message" not in body
+    status, body = request(url + "/result")
+    assert status == 500
     assert "init" in body["error_message"]
     assert request(url + "/submit", "POST", {}) == (status, body)
     assert request(url + "/result") == (status, body)
@@ -331,6 +334,9 @@ def test_invalid_configured_cap_fails_readiness(start_server, monkeypatch, value
     monkeypatch.setenv("RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS", value)
     url = start_server()
     status, body = wait_ready(url)
+    assert status == 500
+    assert body == {"ready": False, "error_type": "BootstrapError"}
+    status, body = request(url + "/result")
     assert status == 500
     assert "finite and positive" in body["error_message"]
 
@@ -568,3 +574,212 @@ def test_real_bootstrap_archive_http_and_deadline_cleanup(
             graphql.shutdown()
             graphql_thread.join(5)
             graphql.server_close()
+
+
+@pytest.mark.parametrize("kind", [None, "", "queue", "api", "invalid"])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "RUNPOD_BUILD_ID",
+        "FLASH_APP_NAME",
+        "FLASH_ENVIRONMENT",
+        "FLASH_RESOURCE_NAME",
+        "RUNPOD_RESOURCE_NAME",
+    ],
+)
+def test_runner_rejects_partial_deployment_identity(
+    start_server, monkeypatch, kind, marker
+):
+    for key in (
+        "RUNPOD_RUNTIME_KIND",
+        "RUNPOD_BUILD_ID",
+        "FLASH_APP_NAME",
+        "FLASH_ENVIRONMENT",
+        "FLASH_RESOURCE_NAME",
+        "RUNPOD_RESOURCE_NAME",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(marker, "deployment")
+    if kind is not None:
+        monkeypatch.setenv("RUNPOD_RUNTIME_KIND", kind)
+    url = start_server()
+    status, body = wait_ready(url)
+    assert status == 500
+    assert body["error_type"] == "BootstrapError"
+    assert "error_message" not in body
+    status, body = request(url + "/result")
+    assert status == 500
+    assert "RUNPOD_RUNTIME_KIND must be task" in body["error_message"]
+    for endpoint in ("/execute", "/submit"):
+        assert request(
+            url + endpoint,
+            "POST",
+            {
+                "function_name": "live",
+                "function_code": "def live(): return 7",
+                "serialization_format": "json",
+            },
+        ) == (status, body)
+
+
+@pytest.mark.parametrize("endpoint", ["/execute", "/submit"])
+@pytest.mark.parametrize("generator", [False, True])
+def test_init_resources_survive_until_async_execution(
+    artifact, start_server, endpoint, generator
+):
+    path, manifest = artifact
+    module = manifest["resources"][0]["module"]
+    result = "yield value" if generator else "return value"
+    (path / (module + ".py")).write_text(
+        'import asyncio\nimport runpod\napp = runpod.App("example")\n'
+        '@app.task(name="work", cpu="cpu3c")\n'
+        "async def work():\n"
+        "    assert asyncio.get_running_loop() is loop\n"
+        "    gate.set()\n"
+        "    value = await asyncio.wait_for(future, 1)\n"
+        f"    {result}\n"
+        "@work.init\n"
+        "async def initialize():\n"
+        "    global loop, future, gate, consumer\n"
+        "    loop = asyncio.get_running_loop()\n"
+        "    future = loop.create_future()\n"
+        "    gate = asyncio.Event()\n"
+        "    async def consume():\n"
+        "        await gate.wait()\n"
+        "        future.set_result(42)\n"
+        "    consumer = asyncio.create_task(consume())\n"
+    )
+    url = start_server()
+    assert wait_ready(url)[0] == 200
+    status, response = request(url + endpoint, "POST", {})
+    assert status == 200
+    if endpoint == "/submit":
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            _, job = request(url + "/result")
+            if job["status"] == "DONE":
+                response = job["response"]
+                break
+            time.sleep(0.01)
+    assert response == {
+        "success": True,
+        "json_result": [42] if generator else 42,
+        "stdout": "",
+    }
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_idle_watchdog_waits_for_initialization(start_server, monkeypatch, fails):
+    entered, release, monitoring = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    original = deployed.load_handle
+    observed = {}
+
+    def load():
+        entered.set()
+        assert release.wait(5)
+        if fails:
+            raise ValueError("init failed")
+        return original()
+
+    def watchdog():
+        observed["contact"] = runner._last_contact["ts"]
+        monitoring.set()
+
+    monkeypatch.setattr(deployed, "load_handle", load)
+    monkeypatch.setattr(runner, "_watchdog", watchdog)
+    url = start_server()
+    try:
+        assert entered.wait(5)
+        assert request(url + "/ping", token=None)[0] == 503
+        assert request(url + "/submit", "POST", {})[0] == 503
+        assert not monitoring.is_set()
+    finally:
+        finished = time.monotonic()
+        release.set()
+    assert wait_ready(url)[0] == (500 if fails else 200)
+    assert monitoring.wait(5)
+    assert observed["contact"] >= finished
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_runner_shutdown_closes_init_loop_and_resources(artifact, monkeypatch, fails):
+    import importlib
+
+    path, manifest = artifact
+    module_name = manifest["resources"][0]["module"]
+    (path / (module_name + ".py")).write_text(
+        'import asyncio\nimport runpod\napp = runpod.App("example")\n'
+        "cancelled = finalized = False\n"
+        '@app.task(name="work", cpu="cpu3c")\n'
+        "async def work():\n    return 42\n"
+        "async def consume():\n"
+        "    global cancelled\n"
+        "    try:\n        await asyncio.Event().wait()\n"
+        "    finally:\n        cancelled = True\n"
+        "async def chunks():\n"
+        "    global finalized\n"
+        "    try:\n        yield 1\n"
+        "    finally:\n        finalized = True\n"
+        "@work.init\n"
+        "async def initialize():\n"
+        "    global loop, consumer, stream\n"
+        "    loop = asyncio.get_running_loop()\n"
+        "    consumer = asyncio.create_task(consume())\n"
+        "    stream = chunks()\n"
+        "    await anext(stream)\n"
+        "    await asyncio.sleep(0)\n"
+        + ('    raise ValueError("init failed")\n' if fails else "")
+    )
+    httpd = Mock()
+    monkeypatch.setattr(runner, "TOKEN", TOKEN)
+    monkeypatch.setattr(runner, "_watchdog", lambda: None)
+    monkeypatch.setattr(runner, "ThreadingHTTPServer", lambda *_: httpd)
+    runner.main()
+    module = importlib.import_module(module_name)
+    assert module.loop.is_closed()
+    assert module.consumer.cancelled()
+    assert module.cancelled
+    assert module.finalized
+    assert runner._ready is not fails
+    httpd.server_close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["bootstrap", "init"])
+def test_readiness_error_details_require_authenticated_route(
+    start_server, monkeypatch, failure
+):
+    detail = "private initialization diagnostic"
+    error = {"error_type": "BootstrapError", "error_message": detail}
+    if failure == "init":
+        monkeypatch.setattr(
+            deployed, "load_handle", Mock(side_effect=ValueError(detail))
+        )
+        url = start_server()
+    else:
+        url = start_server(error)
+    assert wait_ready(url) == (
+        500,
+        {"ready": False, "error_type": "BootstrapError"},
+    )
+    for token in (None, "wrong", TOKEN):
+        assert request(url + "/ping", token=token) == (
+            500,
+            {"ready": False, "error_type": "BootstrapError"},
+        )
+    for endpoint in ("/result", "/execute", "/submit", "/timeout"):
+        method = "GET" if endpoint == "/result" else "POST"
+        body = None if method == "GET" else {}
+        for token in (None, "wrong"):
+            assert request(url + endpoint, method, body, token=token) == (
+                401,
+                {"error": "unauthorized"},
+            )
+        status, response = request(url + endpoint, method, body)
+        assert status == 500
+        assert response["ready"] is False
+        assert response["error_type"] == "BootstrapError"
+        assert detail in response["error_message"]
