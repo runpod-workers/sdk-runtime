@@ -102,12 +102,12 @@ def _deserialize_args(request):
     return args, kwargs
 
 
-def _serialize_result(result, fmt):
+def _serialize_result(result, fmt, *, allow_nan=True):
     if fmt == "json":
         # json-format requests promise json on the wire; failing here
         # keeps dev behavior identical to a deployed endpoint
         try:
-            json.dumps(result)
+            json.dumps(result, allow_nan=allow_nan)
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"return value must be json-serializable "
@@ -177,13 +177,16 @@ def serialize_chunk(chunk, request):
     return response
 
 
-def execute_request(request):
+def execute_request(request, *, prepared=None, run_awaitable=None):
     """run one FunctionRequest to completion, returning a response dict."""
     stdout_io = io.StringIO()
+    strict_json = prepared is not None
+    await_result = run_awaitable or _run_awaitable
     try:
-        prepared, error_response = resolve_request(request)
-        if error_response is not None:
-            return error_response
+        if prepared is None:
+            prepared, error_response = resolve_request(request)
+            if error_response is not None:
+                return error_response
         fn, args, kwargs = prepared
 
         # stdout is teed: captured for the job response and written
@@ -194,18 +197,20 @@ def execute_request(request):
         with redirect_stdout(_Tee(stdout_io, sys.__stdout__)):
             result = fn(*args, **kwargs)
             if hasattr(result, "__await__"):
-                result = _run_awaitable(result)
+                result = await_result(result)
             # generators aggregate so live .remote() matches the
             # deployed worker's return_aggregate_stream output
             elif inspect.isgenerator(result):
                 result = list(result)
             elif inspect.isasyncgen(result):
-                result = _run_awaitable(_drain_async_gen(result))
+                result = await_result(_drain_async_gen(result))
 
         response = {"success": True, "stdout": stdout_io.getvalue()}
         response.update(
             _serialize_result(
-                result, request.get("serialization_format", "cloudpickle")
+                result,
+                request.get("serialization_format", "cloudpickle"),
+                allow_nan=not strict_json,
             )
         )
         return response

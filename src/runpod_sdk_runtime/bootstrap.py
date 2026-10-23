@@ -27,6 +27,8 @@ if any phase fails the worker does not crash-loop silently: a minimal
 job-take loop answers every job with a structured BootstrapError so
 the failure surfaces in job responses (queue endpoints), or an http
 server answers every request with the error (api endpoints).
+task pods serve readiness and execution errors over their token-protected
+http transport; their init hooks run before readiness succeeds.
 
 stdlib only: this file runs on the image's python before any artifact
 environment exists. runtime images bake it in, and custom images install
@@ -57,11 +59,13 @@ UNPACK_MARKER = ".rp-unpacked"
 WORKER_MODULES = {
     "queue": "runpod_sdk_runtime.queue.worker",
     "api": "runpod_sdk_runtime.api.server",
+    "task": "runpod_sdk_runtime.task.runner",
 }
 
 SDK_MODULES = {
     "queue": ("runpod.apps", "runpod.serverless"),
     "api": ("runpod.apps", "fastapi", "uvicorn"),
+    "task": ("runpod.apps", "runpod.apps.handles"),
 }
 
 
@@ -85,6 +89,41 @@ def _resource_name():
     return os.environ.get("FLASH_RESOURCE_NAME") or os.environ.get(
         "RUNPOD_RESOURCE_NAME", ""
     )
+
+
+def _validate_task_environment():
+    if _runtime_kind() != "task":
+        raise PhaseError("identity", "RUNPOD_RUNTIME_KIND must be task")
+    for key in (
+        "FLASH_APP_NAME",
+        "FLASH_ENVIRONMENT",
+        "FLASH_RESOURCE_NAME",
+        "RUNPOD_BUILD_ID",
+    ):
+        if not os.environ.get(key, "").strip():
+            raise PhaseError("identity", f"{key} is required for deployed tasks")
+
+
+def _task_resource(manifest):
+    if not isinstance(manifest, dict):
+        raise PhaseError("attach", "manifest must be an object")
+    if manifest.get("app") != os.environ.get("FLASH_APP_NAME"):
+        raise PhaseError("attach", "manifest app does not match FLASH_APP_NAME")
+    resources = manifest.get("resources")
+    if not isinstance(resources, list) or any(
+        not isinstance(entry, dict) for entry in resources
+    ):
+        raise PhaseError("attach", "manifest resources must be an array of objects")
+    entries = [r for r in resources if r.get("name") == _resource_name()]
+    if len(entries) != 1 or entries[0].get("kind") != "task":
+        raise PhaseError("attach", "manifest must contain exactly one matching task")
+    entry = entries[0]
+    if any(
+        not isinstance(entry.get(key), str) or not entry[key].strip()
+        for key in ("module", "qualname")
+    ):
+        raise PhaseError("attach", "task module and qualname are required")
+    return entry
 
 
 # ---------------------------------------------------------------- locate
@@ -175,8 +214,11 @@ def _manifest(app_dir):
     path = os.path.join(app_dir, MANIFEST_NAME)
     if not os.path.isfile(path):
         raise PhaseError("attach", f"manifest not found at {path}")
-    with open(path) as f:
-        return json.load(f)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError) as exc:
+        raise PhaseError("attach", f"failed to read manifest: {exc}") from exc
 
 
 def _sdk_importable(paths):
@@ -396,7 +438,11 @@ def _api_error_server(error):
 
 def _report_error(error):
     _log(f"FAILED {error}")
-    if _runtime_kind() == "api":
+    if _runtime_kind() == "task":
+        from runpod_sdk_runtime.task.runner import main as task_main
+
+        task_main(bootstrap_error=_error_payload(error))
+    elif _runtime_kind() == "api":
         _api_error_server(error)
     else:
         _queue_error_loop(error)
@@ -407,10 +453,15 @@ def _report_error(error):
 
 def main():
     try:
+        task = _runtime_kind() == "task"
+        if task:
+            _validate_task_environment()
         if _resource_name():
             app_dir = _locate()
             paths = _attach(app_dir)
             manifest = _manifest(app_dir)
+            if task:
+                _task_resource(manifest)
             _verify_excluded(manifest)
             _install_system(manifest)
             ok, err = _sdk_importable(paths)
@@ -426,6 +477,10 @@ def main():
             _serve([])
     except PhaseError as exc:
         _report_error(exc)
+    except Exception as exc:
+        if not task:
+            raise
+        _report_error(PhaseError("bootstrap", str(exc)))
 
 
 if __name__ == "__main__":

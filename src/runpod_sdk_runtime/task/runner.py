@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from runpod_sdk_runtime.executor import execute_request
 from runpod_sdk_runtime.mounts import configure_mounts
+from runpod_sdk_runtime.task import deployed
 
 PORT = int(os.environ.get("RUNPOD_TASK_PORT", "8080"))
 TOKEN = os.environ.get("RUNPOD_TASK_TOKEN", "")
@@ -49,6 +50,11 @@ _last_contact = {"ts": None}  # set at server start
 _inline_executions = {"count": 0}
 _execution_deadline = None
 _watchdog_wakeup = threading.Event()
+_ready = True
+_bootstrap_error = None
+_deployed_handle = None
+_timeout_cap = None
+_production = False
 
 
 def _touch_contact():
@@ -64,6 +70,30 @@ def _set_timeout(timeout):
         if _execution_deadline is None or deadline < _execution_deadline:
             _execution_deadline = deadline
             _watchdog_wakeup.set()
+
+
+def _start_execution(timeout):
+    _set_timeout(_timeout_cap)
+    _set_timeout(timeout)
+
+
+def _configured_timeout(key="RUNPOD_TASK_EXECUTION_TIMEOUT_SECONDS", default=None):
+    value = os.environ.get(key)
+    if value is None:
+        return default
+    try:
+        timeout = float(value)
+    except ValueError:
+        timeout = float("nan")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"{key} must be finite and positive")
+    return timeout
+
+
+def _execute(request):
+    if _production:
+        return deployed.execute(_deployed_handle, request)
+    return execute_request(request)
 
 
 def _should_self_terminate(status, last_contact, now, idle_timeout, inline=0):
@@ -84,11 +114,14 @@ def _terminate_self():
         )
         return False
     api_base = os.environ.get("RUNPOD_API_BASE_URL", "https://api.runpod.io")
+    task = os.environ.get("RUNPOD_RUNTIME_KIND") == "task"
+    mutation = "flashTaskTerminate" if task else "podTerminate"
+    input_type = "FlashTaskTerminateInput" if task else "PodTerminateInput"
     payload = json.dumps(
         {
             "query": (
-                "mutation podTerminate($input: PodTerminateInput!) "
-                "{ podTerminate(input: $input) }"
+                f"mutation {mutation}($input: {input_type}!) "
+                f"{{ {mutation}(input: $input) }}"
             ),
             "variables": {"input": {"podId": pod_id}},
         }
@@ -101,6 +134,8 @@ def _terminate_self():
             "Authorization": f"Bearer {api_key}",
         },
     )
+    if task:
+        request.add_header("X-RunPod-Pod-Id", pod_id)
     for attempt in range(TERMINATE_ATTEMPTS):
         retryable = False
         try:
@@ -111,8 +146,8 @@ def _terminate_self():
             if (
                 not errors
                 and isinstance(data, dict)
-                and "podTerminate" in data
-                and data["podTerminate"] is None
+                and mutation in data
+                and (data[mutation] is True if task else data[mutation] is None)
             ):
                 sys.stderr.write(f"[task-runner] pod {pod_id} deletion acknowledged\n")
                 os._exit(0)
@@ -191,15 +226,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_request(self):
         length = int(self.headers.get("Content-Length", "0"))
+        if length < 0:
+            raise ValueError("invalid content length")
         return json.loads(self.rfile.read(length) or b"{}")
+
+    def _available(self, *, public=False):
+        if _bootstrap_error is not None:
+            error = {"error_type": "BootstrapError"} if public else _bootstrap_error
+            self._send(500, {"ready": False, **error})
+            return False
+        if not _ready:
+            self._send(503, {"ready": False})
+            return False
+        return True
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler api
         if self.path == "/ping":
-            self._send(200, {"ready": True})
+            if self._available(public=True):
+                self._send(200, {"ready": True})
             return
         if self.path == "/result":
             if not self._authed():
                 self._send(401, {"error": "unauthorized"})
+                return
+            if not self._available():
                 return
             with _job_lock:
                 self._send(
@@ -219,21 +269,32 @@ class Handler(BaseHTTPRequestHandler):
         if self.path not in ("/execute", "/submit", "/timeout"):
             self._send(404, {"error": "not found"})
             return
+        if not self._available():
+            return
         try:
             request = self._read_request()
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             self._send(400, {"error": "invalid request"})
             return
         if not isinstance(request, dict):
             self._send(400, {"error": "invalid request"})
             return
+        if _production:
+            try:
+                deployed.validate_request(request, timeout_only=self.path == "/timeout")
+            except (ValueError, TypeError) as exc:
+                self._send(400, {"error": str(exc)})
+                return
         timeout = request.get("timeout")
-        if timeout is not None and (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or not math.isfinite(timeout)
-            or timeout < 0
-        ):
+        try:
+            if timeout is not None and (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float))
+                or not math.isfinite(timeout)
+                or timeout < 0
+            ):
+                raise ValueError
+        except (ValueError, OverflowError):
             self._send(400, {"error": "timeout must be a finite non-negative number"})
             return
         if self.path == "/timeout":
@@ -243,25 +304,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/execute":
             with _job_lock:
-                _set_timeout(timeout)
+                if _production and (
+                    _job_state["status"] != "NONE" or _inline_executions["count"]
+                ):
+                    self._send(409, {"error": "this task has already been submitted"})
+                    return
+                _start_execution(timeout)
                 _inline_executions["count"] += 1
             try:
-                self._send(200, execute_request(request))
+                self._send(200, _execute(request))
             finally:
                 with _job_lock:
                     _inline_executions["count"] -= 1
+                    if _production:
+                        _job_state["status"] = "DONE"
             return
         if self.path == "/submit":
             with _job_lock:
-                if _job_state["status"] == "RUNNING":
+                if _job_state["status"] == "RUNNING" or (
+                    _production
+                    and (_job_state["status"] != "NONE" or _inline_executions["count"])
+                ):
                     self._send(409, {"error": "a job is already running"})
                     return
-                _set_timeout(timeout)
+                _start_execution(timeout)
                 _job_state["status"] = "RUNNING"
                 _job_state["response"] = None
 
             def run():
-                response = execute_request(request)
+                response = _execute(request)
                 with _job_lock:
                     _job_state["status"] = "DONE"
                     _job_state["response"] = response
@@ -279,15 +350,102 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def main() -> None:
+def main(bootstrap_error=None) -> None:
+    global _ready, _bootstrap_error, _deployed_handle, _timeout_cap
+    global _production
     if not TOKEN:
         sys.stderr.write("[task-runner] RUNPOD_TASK_TOKEN not set, exiting\n")
         sys.exit(1)
-    configure_mounts()
-    _touch_contact()
-    threading.Thread(target=_watchdog, daemon=True).start()
+    _bootstrap_error = bootstrap_error
+    _ready = False
+    _deployed_handle = None
+    _timeout_cap = None
+    _production = os.environ.get("RUNPOD_RUNTIME_KIND") == "task" or any(
+        key in os.environ
+        for key in (
+            "RUNPOD_BUILD_ID",
+            "FLASH_APP_NAME",
+            "FLASH_ENVIRONMENT",
+            "FLASH_RESOURCE_NAME",
+            "RUNPOD_RESOURCE_NAME",
+        )
+    )
+
+    def start_watchdog():
+        _touch_contact()
+        threading.Thread(target=_watchdog, daemon=True).start()
+
+    initialization_done = threading.Event()
+
+    def watch_initialization():
+        global _bootstrap_error
+        while True:
+            remaining = init_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if initialization_done.wait(min(remaining, WATCHDOG_INTERVAL)):
+                return
+        with _job_lock:
+            if initialization_done.is_set():
+                return
+            _bootstrap_error = {
+                "error_type": "BootstrapError",
+                "error_message": "task initialization timed out",
+            }
+            initialization_done.set()
+        while not _terminate_self():
+            time.sleep(WATCHDOG_INTERVAL)
+
+    def initialize():
+        global _ready, _bootstrap_error, _deployed_handle, _timeout_cap
+        handle = None
+        error = None
+        try:
+            _timeout_cap = _configured_timeout()
+            configure_mounts()
+            handle = deployed.load_handle()
+        except Exception as exc:
+            error = {
+                "error_type": "BootstrapError",
+                "error_message": f"task initialization failed: {exc}",
+            }
+        with _job_lock:
+            if initialization_done.is_set() or time.monotonic() >= init_deadline:
+                return
+            _deployed_handle = handle
+            _bootstrap_error = error
+            _ready = error is None
+            initialization_done.set()
+        start_watchdog()
+
+    if not _production and bootstrap_error is None:
+        configure_mounts()
+        _ready = True
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    server.serve_forever()
+    initializer = None
+    try:
+        if _production and bootstrap_error is None:
+            try:
+                init_timeout = _configured_timeout("RUNPOD_TASK_INIT_TIMEOUT", 600.0)
+            except ValueError as exc:
+                _bootstrap_error = {
+                    "error_type": "BootstrapError",
+                    "error_message": f"task initialization failed: {exc}",
+                }
+                start_watchdog()
+            else:
+                init_deadline = time.monotonic() + init_timeout
+                threading.Thread(target=watch_initialization, daemon=True).start()
+                initializer = threading.Thread(target=initialize, daemon=True)
+                initializer.start()
+        else:
+            start_watchdog()
+        server.serve_forever()
+    finally:
+        if initializer is not None:
+            initializer.join()
+        server.server_close()
+        deployed.close()
 
 
 if __name__ == "__main__":
