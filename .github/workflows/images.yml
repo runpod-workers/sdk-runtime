@@ -13,6 +13,8 @@ on:
         description: Runpod SDK package spec
         required: true
         default: runpod
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -35,6 +37,10 @@ jobs:
             tag="${RELEASE_TAG#v}"
             sdk_spec="runpod"
             release_tags="true"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            tag="dev"
+            sdk_spec="https://github.com/runpod/runpod-python/archive/refs/heads/main.tar.gz"
+            release_tags="false"
           else
             tag="$INPUT_TAG"
             sdk_spec="$INPUT_SDK_SPEC"
