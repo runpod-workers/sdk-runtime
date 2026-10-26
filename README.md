@@ -85,3 +85,15 @@ docker build \
 
 Conventional commits drive release-please. A release publishes the Python package and
 versioned Docker images, then advances the corresponding `latest` tags.
+
+Merges to `main` sync linked issues into the scheduled Linear release pipeline.
+Published GitHub releases attach their version and release link in Linear. After
+the Python package and all images publish successfully, the release is marked
+complete in Linear and announced in Slack with release notes and a release link.
+
+Configure these GitHub Actions secrets for release tracking and notifications:
+
+- `LINEAR_RELEASE_ACCESS_KEY`: the access key for the SDK runtime's scheduled
+  Linear release pipeline.
+- `SLACK_RELEASE_WEBHOOK_URL`: the incoming webhook for the release announcement
+  channel.
