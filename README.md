@@ -20,8 +20,9 @@ packages excluded from GPU deployment artifacts.
 | `runpod/task-gpu:py3.12-latest` | ephemeral GPU task pods |
 
 Python 3.10 through 3.14 are published. Release tags use
-`py<python>-<runtime-version>`, and `latest` tracks the newest release. Manual image
-publishes support channels such as `dev`.
+`py<python>-<runtime-version>`, and `latest` tracks the newest release. Pushes to
+`main` publish `py<python>-dev` images using the SDK's `main` branch. Manual image
+publishes support custom tag suffixes and SDK package sources.
 
 ## Package
 
