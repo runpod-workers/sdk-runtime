@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/runpod-workers/sdk-runtime/compare/runpod-sdk-runtime-v0.1.0...runpod-sdk-runtime-v0.2.0) (2026-10-30)
+
+
+### Features
+
+* execute registered flash tasks (CON-1833) ([24b3ff8](https://github.com/runpod-workers/sdk-runtime/commit/24b3ff858c663ea8eaf1410478f2abb8f7d13083))
+
 ## 0.1.0 (2026-10-09)
 
 
