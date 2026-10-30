@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -13,6 +15,7 @@ permissions:
 
 jobs:
   release:
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -29,9 +32,24 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
 
-  publish-package:
+  linear-sync-main:
     needs: release
-    if: needs.release.outputs.release_created == 'true'
+    if: needs.release.outputs.release_created != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: linear/linear-release-action@v0
+        with:
+          access_key: ${{ secrets.LINEAR_RELEASE_ACCESS_KEY }}
+          command: sync
+
+  publish-package:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment:
       name: pypi-production
@@ -51,3 +69,91 @@ jobs:
 
       - name: Publish package
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-images:
+    if: github.event_name == 'release'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/images.yml
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  linear-sync:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: linear/linear-release-action@v0
+        with:
+          access_key: ${{ secrets.LINEAR_RELEASE_ACCESS_KEY }}
+          command: sync
+          version: ${{ github.event.release.tag_name }}
+          name: sdk-runtime ${{ github.event.release.tag_name }}
+          links: ${{ github.event.release.html_url }}
+
+  linear-complete:
+    if: github.event_name == 'release'
+    needs: [publish-package, publish-images, linear-sync]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: linear/linear-release-action@v0
+        with:
+          access_key: ${{ secrets.LINEAR_RELEASE_ACCESS_KEY }}
+          command: complete
+          version: ${{ github.event.release.tag_name }}
+
+  notify:
+    if: github.event_name == 'release'
+    needs: [publish-package, publish-images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Build Slack notification
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          title = f"sdk-runtime {os.environ['RELEASE_TAG']} released"
+          notes = os.environ['RELEASE_BODY'].strip() or "See the release for details."
+          if len(notes) > 2800:
+              notes = notes[:2800] + "\n... see the full release for more."
+          payload = {
+              "text": title,
+              "blocks": [
+                  {"type": "header", "text": {"type": "plain_text", "text": title[:150]}},
+                  {"type": "section", "text": {"type": "plain_text", "text": notes}},
+                  {"type": "actions", "elements": [
+                      {"type": "button", "text": {"type": "plain_text", "text": "View release"},
+                       "url": os.environ['RELEASE_URL']}
+                  ]},
+              ],
+          }
+          Path("slack_payload.json").write_text(json.dumps(payload))
+          PY
+
+      - name: Send release notification
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          errors: true
+          webhook: ${{ secrets.SLACK_RELEASE_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload-file-path: ./slack_payload.json
