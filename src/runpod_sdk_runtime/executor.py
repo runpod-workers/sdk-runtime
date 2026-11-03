@@ -1,20 +1,15 @@
 """shared FunctionRequest execution engine.
 
 runs one function from shipped source: installs dependencies, execs the
-module, resolves the function, and serializes the result per the
-request's serialization_format. every runtime that executes live
-requests (task pods, queue workers in dev mode, api servers) drives
-this same engine.
+module, resolves the function, and validates json arguments and results.
+every runtime that executes live requests (task pods, queue workers in
+dev mode, api servers) drives this same engine.
 
-stdlib-only (cloudpickle optional, required only for the cloudpickle
-serialization format) so it can ship as part of a single-file bootstrap
-onto any python image.
+the runpod sdk supplies the shared protocol and json validation rules.
 """
 
-import base64
 import inspect
 import io
-import json
 import os
 import shutil
 import subprocess
@@ -22,23 +17,6 @@ import sys
 import threading
 import traceback
 from contextlib import redirect_stdout
-
-
-def _load_cloudpickle(install: bool = False):
-    try:
-        import cloudpickle
-
-        return cloudpickle
-    except ImportError:
-        if not install:
-            return None
-    # bare images (custom image= without the runtime baked in) may lack
-    # cloudpickle; install it on demand the same way dependencies are
-    if _install(["cloudpickle"], "cloudpickle"):
-        return None
-    import cloudpickle
-
-    return cloudpickle
 
 
 def _install(packages, label):
@@ -88,36 +66,13 @@ def _install_system(packages):
     return None
 
 
-def _deserialize_args(request):
-    fmt = request.get("serialization_format", "cloudpickle")
-    args = request.get("args") or []
-    kwargs = request.get("kwargs") or {}
-    if fmt == "json":
-        return list(args), dict(kwargs)
-    cloudpickle = _load_cloudpickle(install=True)
-    if cloudpickle is None:
-        raise RuntimeError("cloudpickle not available for argument deserialization")
-    args = [cloudpickle.loads(base64.b64decode(a)) for a in args]
-    kwargs = {k: cloudpickle.loads(base64.b64decode(v)) for k, v in kwargs.items()}
-    return args, kwargs
+def _serialize_result(result, fmt):
+    from runpod._serialization import normalize_json
+    from runpod.apps.protocol import FORMAT_JSON
 
-
-def _serialize_result(result, fmt, *, allow_nan=True):
-    if fmt == "json":
-        # json-format requests promise json on the wire; failing here
-        # keeps dev behavior identical to a deployed endpoint
-        try:
-            json.dumps(result, allow_nan=allow_nan)
-        except (TypeError, ValueError) as exc:
-            raise TypeError(
-                f"return value must be json-serializable "
-                f"(this request uses the json wire format): {exc}"
-            ) from exc
-        return {"json_result": result}
-    cloudpickle = _load_cloudpickle(install=True)
-    if cloudpickle is None:
-        return {"json_result": result}
-    return {"result": base64.b64encode(cloudpickle.dumps(result)).decode("utf-8")}
+    if fmt != FORMAT_JSON:
+        raise ValueError("serialization_format must be 'json'")
+    return {"json_result": normalize_json(result, "return value")}
 
 
 def resolve_request(request):
@@ -127,20 +82,38 @@ def resolve_request(request):
     target function. returns ((fn, args, kwargs), None) on success or
     (None, response_dict) on failure.
     """
-    error = _install_system(request.get("system_dependencies"))
-    if error:
-        return None, {"success": False, "error": error}
-    error = _install(request.get("dependencies"), "dependencies")
-    if error:
-        return None, {"success": False, "error": error}
+    from runpod.apps.protocol import FunctionRequest
 
-    function_name = request.get("function_name")
-    function_code = request.get("function_code")
+    if isinstance(request, dict) and not request.get("function_name"):
+        return None, {
+            "success": False,
+            "error": "function_name and function_code are required",
+        }
+    parsed = FunctionRequest.from_input(request)
+    function_name = parsed.function_name
+    function_code = parsed.function_code
     if not function_name or not function_code:
         return None, {
             "success": False,
             "error": "function_name and function_code are required",
         }
+
+    if not isinstance(function_name, str) or not isinstance(function_code, str):
+        raise TypeError("function_name and function_code must be strings")
+    for label in ("dependencies", "system_dependencies"):
+        packages = getattr(parsed, label)
+        if packages is not None and (
+            not isinstance(packages, list)
+            or not all(isinstance(package, str) for package in packages)
+        ):
+            raise TypeError(f"{label} must be a list of strings")
+
+    error = _install_system(parsed.system_dependencies)
+    if error:
+        return None, {"success": False, "error": error}
+    error = _install(parsed.dependencies, "dependencies")
+    if error:
+        return None, {"success": False, "error": error}
 
     # exec mirrors deployed-mode module import: the code is the
     # user's full module, so __name__ is set like an import would
@@ -160,8 +133,7 @@ def resolve_request(request):
     fn = namespace[function_name]
     fn = getattr(fn, "_fn", fn)
 
-    args, kwargs = _deserialize_args(request)
-    return (fn, args, kwargs), None
+    return (fn, parsed.args, parsed.kwargs), None
 
 
 def serialize_chunk(chunk, request):
@@ -170,9 +142,11 @@ def serialize_chunk(chunk, request):
     the __stream__ marker lets clients tell a stream of chunks apart
     from a single aggregated function response.
     """
+    from runpod.apps.protocol import FORMAT_JSON
+
     response = {"success": True, "__stream__": True}
     response.update(
-        _serialize_result(chunk, request.get("serialization_format", "cloudpickle"))
+        _serialize_result(chunk, request.get("serialization_format", FORMAT_JSON))
     )
     return response
 
@@ -180,14 +154,20 @@ def serialize_chunk(chunk, request):
 def execute_request(request, *, prepared=None, run_awaitable=None):
     """run one FunctionRequest to completion, returning a response dict."""
     stdout_io = io.StringIO()
-    strict_json = prepared is not None
     await_result = run_awaitable or _run_awaitable
     try:
+        from runpod._serialization import normalize_json, validate_json
+        from runpod.apps.protocol import FORMAT_JSON
+
         if prepared is None:
             prepared, error_response = resolve_request(request)
             if error_response is not None:
                 return error_response
         fn, args, kwargs = prepared
+        fmt = request.get("serialization_format", FORMAT_JSON)
+        if fmt != FORMAT_JSON:
+            raise ValueError("serialization_format must be 'json'")
+        args, kwargs = normalize_json([args, kwargs], "arguments")
 
         # stdout is teed: captured for the job response and written
         # through to the real stdout so container logs (and live log
@@ -201,18 +181,16 @@ def execute_request(request, *, prepared=None, run_awaitable=None):
             # generators aggregate so live .remote() matches the
             # deployed worker's return_aggregate_stream output
             elif inspect.isgenerator(result):
-                result = list(result)
+                chunks = []
+                for chunk in result:
+                    validate_json(chunk, "return value")
+                    chunks.append(chunk)
+                result = chunks
             elif inspect.isasyncgen(result):
                 result = await_result(_drain_async_gen(result))
 
         response = {"success": True, "stdout": stdout_io.getvalue()}
-        response.update(
-            _serialize_result(
-                result,
-                request.get("serialization_format", "cloudpickle"),
-                allow_nan=not strict_json,
-            )
-        )
+        response.update(_serialize_result(result, fmt))
         return response
     except Exception:  # noqa: BLE001 - all failures go over the wire
         return {
@@ -284,7 +262,13 @@ def _run_awaitable(awaitable):
 
 
 async def _drain_async_gen(agen):
-    return [chunk async for chunk in agen]
+    from runpod._serialization import validate_json
+
+    chunks = []
+    async for chunk in agen:
+        validate_json(chunk, "return value")
+        chunks.append(chunk)
+    return chunks
 
 
 async def _await(awaitable):

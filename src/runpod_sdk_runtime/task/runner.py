@@ -209,7 +209,16 @@ def _watchdog():
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, payload):
-        body = json.dumps(payload).encode("utf-8")
+        try:
+            response = payload.get("response", payload)
+            if isinstance(response, dict) and response.get("success") is True:
+                from runpod._serialization import validate_json
+
+                validate_json(payload, "response")
+            body = json.dumps(payload, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError, RecursionError) as exc:
+            code = 500
+            body = json.dumps({"success": False, "error": str(exc)}).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -225,10 +234,20 @@ class Handler(BaseHTTPRequestHandler):
         return authed
 
     def _read_request(self):
+        def finite_number(value):
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError("json numbers must be finite")
+            return number
+
         length = int(self.headers.get("Content-Length", "0"))
         if length < 0:
-            raise ValueError("invalid content length")
-        return json.loads(self.rfile.read(length) or b"{}")
+            raise ValueError("content length must be non-negative")
+        return json.loads(
+            self.rfile.read(length) or b"{}",
+            parse_constant=finite_number,
+            parse_float=finite_number,
+        )
 
     def _available(self, *, public=False):
         if _bootstrap_error is not None:
@@ -273,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             request = self._read_request()
-        except (ValueError, TypeError, OverflowError):
+        except (ValueError, TypeError, OverflowError, RecursionError):
             self._send(400, {"error": "invalid request"})
             return
         if not isinstance(request, dict):
