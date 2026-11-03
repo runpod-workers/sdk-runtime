@@ -199,12 +199,24 @@ def test_bootstrap_installs_sdk_without_serializers(monkeypatch, kind):
     install.assert_called_once_with(expected, "runtime")
 
 
-def test_bootstrap_probe_requires_json_protocol(monkeypatch, tmp_path):
+@pytest.mark.parametrize("missing", ["normalize_json", "from_input"])
+def test_bootstrap_probe_requires_json_protocol(monkeypatch, tmp_path, missing):
     monkeypatch.setenv("RUNPOD_RUNTIME_KIND", "queue")
     package = tmp_path / "runpod"
     package.mkdir()
-    for filename in ("__init__.py", "apps.py", "serverless.py"):
+    for filename in ("__init__.py", "serverless.py"):
         (package / filename).write_text("")
+    apps = package / "apps"
+    apps.mkdir()
+    (apps / "__init__.py").write_text("")
+    (apps / "protocol.py").write_text(
+        "FORMAT_JSON = 'json'\nclass FunctionRequest:\n    pass\n"
+    )
+    (package / "_serialization.py").write_text(
+        ""
+        if missing == "normalize_json"
+        else "def normalize_json(value): pass\ndef validate_json(value): pass\n"
+    )
     ok, error = bootstrap._sdk_importable([str(tmp_path)])
     assert ok is False
-    assert "runpod._serialization" in error
+    assert missing in error
