@@ -3,7 +3,6 @@
 import asyncio
 import importlib
 import inspect
-import json
 import os
 import sys
 import threading
@@ -93,6 +92,10 @@ def load_handle():
 
 
 def validate_request(request, *, timeout_only=False):
+    from runpod._serialization import validate_json
+
+    if not isinstance(request, dict):
+        raise TypeError("task request must be a dictionary")
     allowed = (
         {"timeout"}
         if timeout_only
@@ -106,7 +109,7 @@ def validate_request(request, *, timeout_only=False):
         raise ValueError("args must be a json array")
     if not isinstance(request.get("kwargs", {}), dict):
         raise ValueError("kwargs must be a json object")
-    json.dumps(request, allow_nan=False)
+    validate_json(request, "task request")
 
 
 def execute(handle, request):

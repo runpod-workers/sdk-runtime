@@ -152,24 +152,38 @@ class TestStdoutTee:
         assert "live line" in capfd.readouterr().out
 
 
-class TestCloudpickleLoading:
-    def test_available_returns_module(self):
-        module = executor._load_cloudpickle()
-        assert module is not None
-        assert hasattr(module, "dumps")
+class TestJsonSerialization:
+    def test_result_contains_json_value(self):
+        assert executor._serialize_result({"value": [42, None]}, "json") == {
+            "json_result": {"value": [42, None]}
+        }
 
-    def test_missing_without_install_returns_none(self, monkeypatch):
+    def test_json_execution_needs_no_pickle_import_or_install(self, monkeypatch):
         import builtins
+        from unittest.mock import Mock
 
         real_import = builtins.__import__
 
         def no_cloudpickle(name, *args, **kwargs):
             if name == "cloudpickle":
-                raise ImportError("not installed")
+                raise AssertionError("cloudpickle must not be imported")
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", no_cloudpickle)
-        assert executor._load_cloudpickle(install=False) is None
+        install = Mock(side_effect=AssertionError("pip must not run"))
+        monkeypatch.setattr(executor.subprocess, "run", install)
+        response = executor.execute_request(
+            {
+                "function_name": "echo",
+                "function_code": "def echo(value):\n    return value",
+                "args": [{"value": [42, None]}],
+                "serialization_format": "json",
+            }
+        )
+        assert response["success"] is True
+        assert response["json_result"] == {"value": [42, None]}
+        assert "result" not in response
+        install.assert_not_called()
 
 
 class TestInstallHelpers:
