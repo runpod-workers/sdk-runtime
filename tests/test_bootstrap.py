@@ -295,7 +295,20 @@ class TestLiveSdkInstall:
         monkeypatch.delenv("RUNPOD_PACKAGE_SPEC", raising=False)
         monkeypatch.setenv("RUNPOD_RUNTIME_KIND", "api")
         bootstrap._ensure_sdk_installed()
-        assert installs == [["runpod", "fastapi[standard]", "uvicorn>=0.30"]]
+        assert installs == [["runpod>=2.2.0", "fastapi[standard]", "uvicorn>=0.30"]]
+
+    @pytest.mark.parametrize("kind", ["queue", "task"])
+    def test_default_sdk_minimum(self, monkeypatch, kind):
+        probes = iter([(False, "no module"), (True, "")])
+        monkeypatch.setattr(bootstrap, "_sdk_importable", lambda paths: next(probes))
+        installs = []
+        monkeypatch.setattr(
+            bootstrap, "_pip_install", lambda pkgs, phase: installs.append(pkgs)
+        )
+        monkeypatch.delenv("RUNPOD_PACKAGE_SPEC", raising=False)
+        monkeypatch.setenv("RUNPOD_RUNTIME_KIND", kind)
+        bootstrap._ensure_sdk_installed()
+        assert installs == [["runpod>=2.2.0"]]
 
     def test_install_failure_raises_phase(self, monkeypatch):
         monkeypatch.setattr(

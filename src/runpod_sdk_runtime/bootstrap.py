@@ -349,7 +349,7 @@ def _ensure_sdk_installed():
     ok, _ = _sdk_importable([])
     if ok:
         return
-    spec = os.environ.get("RUNPOD_PACKAGE_SPEC", "runpod")
+    spec = os.environ.get("RUNPOD_PACKAGE_SPEC", "runpod>=2.2.0")
     _log(f"worker sdk not in image, installing {spec}")
     packages = [spec]
     if _runtime_kind() == "api":

@@ -79,7 +79,7 @@ or executing source. Task and live queue failures use a `success: false` respons
 with an `error` message; a failing stream emits that response after any valid chunks.
 Deployed queue failures use the serverless job error response.
 
-The runtime requires a Runpod SDK with the shared JSON protocol validators in
+The runtime requires Runpod SDK 2.2.0 or later, with shared JSON protocol validators in
 `runpod.apps.protocol` and `runpod._serialization`, including in vendored
 deployment environments and custom images. SDK and runtime releases must be
 deployed together for this protocol contract.
@@ -123,11 +123,10 @@ alive for the next watchdog pass. Container exit alone does not stop pod billing
 
 ## Development
 
-Install the Apps SDK checkout first, then install this project:
+Install this project with its published SDK dependency:
 
 ```bash
-uv sync --all-groups
-uv pip install -e ../runpod-python
+uv sync --locked --all-groups
 uv run --no-sync pytest
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
@@ -139,7 +138,7 @@ Build a CPU queue image against a specific SDK package source:
 docker build \
   -f docker/queue.Dockerfile \
   --build-arg BASE_IMAGE=python:3.12-slim \
-  --build-arg RUNPOD_PACKAGE_SPEC=runpod \
+  --build-arg 'RUNPOD_PACKAGE_SPEC=runpod>=2.2.0' \
   -t runpod/queue:local .
 ```
 

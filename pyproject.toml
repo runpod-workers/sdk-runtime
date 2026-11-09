@@ -10,7 +10,7 @@ authors = [
 ]
 dependencies = [
     "fastapi[standard]>=0.115.0",
-    "runpod",
+    "runpod>=2.2.0",
     "uvicorn>=0.30.0",
 ]
 

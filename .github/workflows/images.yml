@@ -12,7 +12,7 @@ on:
       runpod_package_spec:
         description: Runpod SDK package spec
         required: true
-        default: runpod
+        default: runpod>=2.2.0
 
 permissions:
   contents: read
@@ -33,7 +33,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             tag="${RELEASE_TAG#v}"
-            sdk_spec="runpod"
+            sdk_spec="runpod>=2.2.0"
             release_tags="true"
           else
             tag="$INPUT_TAG"
