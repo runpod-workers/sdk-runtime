@@ -3,7 +3,14 @@
     ".": {
       "release-type": "python",
       "package-name": "runpod-sdk-runtime",
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='runpod-sdk-runtime')].version"
+        }
+      ]
     }
   }
 }
