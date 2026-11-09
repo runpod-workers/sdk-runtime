@@ -64,6 +64,26 @@ Production execution accepts JSON `args` and `kwargs`, with an optional transpor
 envelope. Requests cannot supply source, dependencies, mounts, or pickle
 serialization. Source-mode tasks use the shared live executor.
 
+## Remote values
+
+Tasks and queues accept finite JSON-compatible arguments, results, and stream
+chunks. JSON conversion turns tuples into lists and supported dictionary keys
+into strings. Python objects, bytes, non-finite numbers, and cyclic containers
+fail validation. Use JSON representations for custom types and encode binary
+data as strings.
+
+Live requests use `serialization_format: "json"`, which is also the default.
+Successful responses contain `json_result`, including for a null return value.
+Workers validate arguments and the format before installing request dependencies
+or executing source. Task and live queue failures use a `success: false` response
+with an `error` message; a failing stream emits that response after any valid chunks.
+Deployed queue failures use the serverless job error response.
+
+The runtime requires Runpod SDK 2.2.0 or later, with shared JSON protocol validators in
+`runpod.apps.protocol` and `runpod._serialization`, including in vendored
+deployment environments and custom images. SDK and runtime releases must be
+deployed together for this protocol contract.
+
 ## Storage bindings
 
 Apps provisioning supplies `RUNPOD_MOUNTS`, a JSON array of bindings with `kind`
@@ -103,11 +123,10 @@ alive for the next watchdog pass. Container exit alone does not stop pod billing
 
 ## Development
 
-Install the Apps SDK checkout first, then install this project:
+Install this project with its published SDK dependency:
 
 ```bash
-uv sync --all-groups
-uv pip install -e ../runpod-python
+uv sync --locked --all-groups
 uv run --no-sync pytest
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
@@ -119,7 +138,7 @@ Build a CPU queue image against a specific SDK package source:
 docker build \
   -f docker/queue.Dockerfile \
   --build-arg BASE_IMAGE=python:3.12-slim \
-  --build-arg RUNPOD_PACKAGE_SPEC=runpod \
+  --build-arg 'RUNPOD_PACKAGE_SPEC=runpod>=2.2.0' \
   -t runpod/queue:local .
 ```
 

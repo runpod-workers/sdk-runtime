@@ -349,12 +349,21 @@ def test_no_policy_cap_does_not_add_deadline(start_server):
 
 
 def test_deployed_execution_never_resolves_source_or_pickle(artifact, monkeypatch):
+    import builtins
+
     from runpod_sdk_runtime import executor
 
     resolve = Mock(side_effect=AssertionError("source resolution"))
     pickle = Mock(side_effect=AssertionError("pickle resolution"))
     monkeypatch.setattr(executor, "resolve_request", resolve)
-    monkeypatch.setattr(executor, "_load_cloudpickle", pickle)
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "cloudpickle":
+            pickle()
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
     result = deployed.execute(deployed.load_handle(), {"kwargs": {"value": 7}})
     assert result["json_result"] == {"value": 7}
     resolve.assert_not_called()

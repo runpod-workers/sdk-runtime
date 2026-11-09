@@ -226,7 +226,10 @@ def _sdk_importable(paths):
     modules = SDK_MODULES[_runtime_kind()]
     probe = (
         "import sys; sys.path[:0] = sys.argv[1:]; import importlib; "
-        f"[importlib.import_module(name) for name in {modules!r}]"
+        f"[importlib.import_module(name) for name in {modules!r}]; "
+        "from runpod._serialization import normalize_json, validate_json; "
+        "from runpod.apps.protocol import FORMAT_JSON, FunctionRequest; "
+        "FunctionRequest.from_input"
     )
     result = subprocess.run(
         [sys.executable, "-c", probe, *paths],
@@ -346,9 +349,9 @@ def _ensure_sdk_installed():
     ok, _ = _sdk_importable([])
     if ok:
         return
-    spec = os.environ.get("RUNPOD_PACKAGE_SPEC", "runpod")
+    spec = os.environ.get("RUNPOD_PACKAGE_SPEC", "runpod>=2.2.0")
     _log(f"worker sdk not in image, installing {spec}")
-    packages = [spec, "cloudpickle"]
+    packages = [spec]
     if _runtime_kind() == "api":
         packages.extend(("fastapi[standard]", "uvicorn>=0.30"))
     _pip_install(packages, "runtime")

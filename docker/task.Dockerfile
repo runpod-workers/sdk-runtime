@@ -1,7 +1,7 @@
 ARG BASE_IMAGE=python:3.12-slim
 FROM ${BASE_IMAGE}
 
-ARG RUNPOD_PACKAGE_SPEC=runpod
+ARG RUNPOD_PACKAGE_SPEC=runpod>=2.2.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Etc/UTC \

@@ -9,9 +9,8 @@ authors = [
     { name = "Runpod", email = "engineer@runpod.io" },
 ]
 dependencies = [
-    "cloudpickle>=3.0.0",
     "fastapi[standard]>=0.115.0",
-    "runpod",
+    "runpod>=2.2.0",
     "uvicorn>=0.30.0",
 ]
 
@@ -55,3 +54,4 @@ ignore = ["S101"]
 "src/runpod_sdk_runtime/executor.py" = ["S603", "S607"]
 "src/runpod_sdk_runtime/task/runner.py" = ["S104", "S110", "S310"]
 "tests/*" = ["S105", "S106", "S310"]
+"tests/test_bootstrap_without_sdk.py" = ["S603"]

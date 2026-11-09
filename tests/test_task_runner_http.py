@@ -5,7 +5,6 @@ protocol over actual sockets. engine behavior (dependency install,
 serialization, stdout capture) is covered in test_executor.py.
 """
 
-import base64
 import json
 import threading
 import time
@@ -13,7 +12,6 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-import cloudpickle
 import pytest
 
 from runpod_sdk_runtime.task import runner as task_runner
@@ -72,14 +70,6 @@ def _request(url, method="GET", body=None, token=TOKEN):
         return resp.status, json.loads(resp.read())
 
 
-def _b64(value):
-    return base64.b64encode(cloudpickle.dumps(value)).decode()
-
-
-def _unb64(value):
-    return cloudpickle.loads(base64.b64decode(value))
-
-
 def test_ping_unauthenticated(server):
     status, body = _request(f"{server}/ping", token=None)
     assert status == 200
@@ -99,13 +89,14 @@ def test_execute_roundtrip(server):
         body={
             "function_name": "mul",
             "function_code": "def mul(a, b):\n    return a * b",
-            "args": [_b64(6), _b64(7)],
+            "args": [6, 7],
             "kwargs": {},
         },
     )
     assert status == 200
     assert body["success"] is True
-    assert _unb64(body["result"]) == 42
+    assert body["json_result"] == 42
+    assert "result" not in body
 
 
 def test_submit_and_result(server):

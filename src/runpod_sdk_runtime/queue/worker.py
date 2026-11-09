@@ -12,7 +12,7 @@ deployed mode (rp deploy):
 
 live mode (rp dev):
     no artifact. each job carries a FunctionRequest (source +
-    serialized args) which is executed via the shared engine in
+    json arguments) which is executed via the shared engine in
     runpod_sdk_runtime.executor.
 """
 
@@ -21,8 +21,10 @@ import inspect
 import json
 import os
 import sys
+import traceback
 
 import runpod
+from runpod._serialization import validate_json
 
 from runpod_sdk_runtime.mounts import configure_mounts
 
@@ -75,7 +77,11 @@ def _load_deployed_handle():
 
 
 def _job_kwargs(job: dict) -> dict:
-    body = dict(job.get("input") or {})
+    body = job.get("input", {})
+    if not isinstance(body, dict):
+        raise TypeError("job input must be a dictionary")
+    validate_json(body, "job input")
+    body = dict(body)
     body.pop("__empty", None)
     return body
 
@@ -133,23 +139,26 @@ async def _live_handler(job: dict):
         serialize_chunk,
     )
 
-    request = job.get("input") or {}
-    prepared, error_response = resolve_request(request)
-    if error_response is not None:
-        yield error_response
-        return
-    fn, args, kwargs = prepared
+    try:
+        request = job.get("input", {})
+        prepared, error_response = resolve_request(request)
+        if error_response is not None:
+            yield error_response
+            return
+        fn, args, kwargs = prepared
 
-    if inspect.isasyncgenfunction(fn):
-        async for chunk in fn(*args, **kwargs):
-            yield serialize_chunk(chunk, request)
-        return
-    if inspect.isgeneratorfunction(fn):
-        for chunk in fn(*args, **kwargs):
-            yield serialize_chunk(chunk, request)
-        return
+        if inspect.isasyncgenfunction(fn):
+            async for chunk in fn(*args, **kwargs):
+                yield serialize_chunk(chunk, request)
+            return
+        if inspect.isgeneratorfunction(fn):
+            for chunk in fn(*args, **kwargs):
+                yield serialize_chunk(chunk, request)
+            return
 
-    yield execute_request(request)
+        yield execute_request(request, prepared=prepared)
+    except Exception:
+        yield {"success": False, "error": traceback.format_exc()}
 
 
 def _max_concurrency() -> int:
