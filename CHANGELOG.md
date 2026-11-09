@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/runpod-workers/sdk-runtime/compare/runpod-sdk-runtime-v0.2.0...runpod-sdk-runtime-v0.2.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* share JSON validation across worker runtimes ([#9](https://github.com/runpod-workers/sdk-runtime/issues/9)) ([d952ecd](https://github.com/runpod-workers/sdk-runtime/commit/d952ecd180641b1ae1d98660e9f22dcaad3826ea))
+
 ## [0.2.0](https://github.com/runpod-workers/sdk-runtime/compare/runpod-sdk-runtime-v0.1.0...runpod-sdk-runtime-v0.2.0) (2026-10-30)
 
 
