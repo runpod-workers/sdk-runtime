@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  RUNPOD_SDK_REF: dea0cb1a2efad9d3962426add4d9929955966781
+  RUNPOD_SDK_REF: 367f174ef14cc7fcf909a3b26413c3f2d38cbd9b
 
 jobs:
   test:
