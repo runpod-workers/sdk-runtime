@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Draft release tag to finish publishing
+        type: string
+        required: false
+
+concurrency:
+  group: runtime-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -22,6 +31,28 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
       - uses: googleapis/release-please-action@v4
+        if: inputs.release_tag == ''
         id: release
         with:
           token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/checkout@v7
+        if: steps.release.outputs.release_created == 'true' || inputs.release_tag != ''
+        with:
+          ref: ${{ steps.release.outputs.sha || inputs.release_tag }}
+
+      - uses: astral-sh/setup-uv@v7
+        if: steps.release.outputs.release_created == 'true' || inputs.release_tag != ''
+
+      - name: Publish runtime release asset
+        if: steps.release.outputs.release_created == 'true' || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name || inputs.release_tag }}
+        run: |
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+          uv build --sdist --out-dir dist
+          mv dist/*.tar.gz dist/runpod-sdk-runtime.tar.gz
+          gh release upload "$RELEASE_TAG" dist/runpod-sdk-runtime.tar.gz --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest
