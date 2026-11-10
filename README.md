@@ -39,6 +39,24 @@ python -m runpod_sdk_runtime.task.runner
 `RUNPOD_RUNTIME_KIND` selects `queue`, `api`, or deployed `task` when running the
 shared bootstrap. Source-mode tasks start through `runpod_sdk_runtime.task.runner`.
 
+## Native APIs
+
+Native API routes use literal paths and ordinary instance methods. GET handlers
+take only `self`. POST, PUT, PATCH, and DELETE handlers take `self` or
+`self, body`, where `body` is one required positional parameter annotated with
+`Any`, bare `dict`, bare `typing.Dict`, or no annotation. Defaults, variadic
+parameters, keyword-only bodies, schemas, typed generics, and path or query
+binding are not supported. The SDK validates declarations at `@app.api`.
+
+Body handlers receive the complete JSON object without field validation or
+coercion. Missing bodies, JSON null, non-object values, and invalid JSON return
+HTTP 422. Handlers taking only `self` do not consume the request body. Both sync
+and async methods work in live and deployed APIs.
+
+ASGI factories support their framework's typed path, query, and body parameters
+and validation. See the [SDK native API documentation](https://github.com/runpod/runpod-python/blob/main/docs/apps/native-api.md)
+for the native route contract and examples.
+
 ## Deployed tasks
 
 The control plane starts production task pods through the shared bootstrap with
