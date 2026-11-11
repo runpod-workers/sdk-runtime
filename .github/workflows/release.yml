@@ -52,6 +52,13 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag_name || inputs.release_tag }}
         run: |
           test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+          published_tags=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          newest_tag=$(printf '%s\n' "$published_tags" "$RELEASE_TAG" | sort -V | tail -n 1)
+          if [ "$newest_tag" != "$RELEASE_TAG" ]; then
+            echo "Cannot publish $RELEASE_TAG: newer release $newest_tag is already published." >&2
+            exit 1
+          fi
           uv build --sdist --out-dir dist
           mv dist/*.tar.gz dist/runpod-sdk-runtime.tar.gz
           gh release upload "$RELEASE_TAG" dist/runpod-sdk-runtime.tar.gz --clobber
