@@ -123,7 +123,7 @@ def _build_class_app(handle) -> Any:
 
 def _mount_routes(app: Any, handle, instance) -> None:
     """add each @get/@post route of an ApiHandle's class to a fastapi app."""
-    from fastapi import Request
+    from fastapi import Body
 
     for route in handle.spec.routes:
         method = getattr(route, "method", None) or route["method"]
@@ -132,16 +132,22 @@ def _mount_routes(app: Any, handle, instance) -> None:
         bound = getattr(instance, handler_name)
 
         def make_endpoint(fn):
-            async def endpoint(request: Request):
-                body = None
-                if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-                    try:
-                        body = await request.json()
-                    except Exception:  # noqa: BLE001 - empty/non-json body
-                        body = None
-                if body is not None:
+            if sys.version_info >= (3, 14):
+                from annotationlib import Format
+
+                signature = inspect.signature(fn, annotation_format=Format.STRING)
+            else:
+                signature = inspect.signature(fn)
+
+            if signature.parameters:
+
+                async def endpoint(body: dict = Body(...)):
                     return await _maybe_await(fn(body))
-                return await _maybe_await(fn())
+
+            else:
+
+                async def endpoint():
+                    return await _maybe_await(fn())
 
             return endpoint
 
