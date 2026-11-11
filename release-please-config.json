@@ -3,6 +3,8 @@
     ".": {
       "release-type": "python",
       "package-name": "runpod-sdk-runtime",
+      "draft": true,
+      "force-tag-creation": true,
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {

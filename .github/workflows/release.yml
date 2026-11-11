@@ -4,18 +4,24 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Draft release tag to finish publishing
+        type: string
+        required: false
+
+concurrency:
+  group: runtime-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
-  id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -25,29 +31,35 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
       - uses: googleapis/release-please-action@v4
+        if: inputs.release_tag == ''
         id: release
         with:
           token: ${{ steps.app-token.outputs.token }}
 
-  publish-package:
-    needs: release
-    if: needs.release.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi-production
-      url: https://pypi.org/project/runpod-sdk-runtime/
-    permissions:
-      contents: read
-      id-token: write
-    steps:
       - uses: actions/checkout@v7
+        if: steps.release.outputs.release_created == 'true' || inputs.release_tag != ''
         with:
-          fetch-depth: 0
+          ref: ${{ steps.release.outputs.sha || inputs.release_tag }}
 
       - uses: astral-sh/setup-uv@v7
+        if: steps.release.outputs.release_created == 'true' || inputs.release_tag != ''
 
-      - name: Build package
-        run: uv build
-
-      - name: Publish package
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish runtime release asset
+        if: steps.release.outputs.release_created == 'true' || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name || inputs.release_tag }}
+        run: |
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+          published_tags=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          newest_tag=$(printf '%s\n' "$published_tags" "$RELEASE_TAG" | sort -V | tail -n 1)
+          if [ "$newest_tag" != "$RELEASE_TAG" ]; then
+            echo "Cannot publish $RELEASE_TAG: newer release $newest_tag is already published." >&2
+            exit 1
+          fi
+          uv build --sdist --out-dir dist
+          mv dist/*.tar.gz dist/runpod-sdk-runtime.tar.gz
+          gh release upload "$RELEASE_TAG" dist/runpod-sdk-runtime.tar.gz --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest
