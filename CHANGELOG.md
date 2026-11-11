@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/runpod-workers/sdk-runtime/compare/runpod-sdk-runtime-v0.2.1...runpod-sdk-runtime-v0.2.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **api:** dispatch native routes by their declared input ([#13](https://github.com/runpod-workers/sdk-runtime/issues/13)) ([89addba](https://github.com/runpod-workers/sdk-runtime/commit/89addba668babb6c7d06731a1ad43c064f85877e))
+
 ## [0.2.1](https://github.com/runpod-workers/sdk-runtime/compare/runpod-sdk-runtime-v0.2.0...runpod-sdk-runtime-v0.2.1) (2026-11-09)
 
 
