@@ -39,6 +39,18 @@ python -m runpod_sdk_runtime.task.runner
 `RUNPOD_RUNTIME_KIND` selects `queue`, `api`, or deployed `task` when running the
 shared bootstrap. Source-mode tasks start through `runpod_sdk_runtime.task.runner`.
 
+## Native API request bodies
+
+Native class-based routes with one required body argument receive a complete JSON
+object. The runtime parses the body as JSON regardless of the `Content-Type`
+header. For example, a handler `def echo(self, body: dict): return body` accepts
+`curl -X POST https://<worker>/echo -d '{"prompt":"hi"}'`, which returns
+`{"prompt":"hi"}`. Sending `Content-Type: application/json` is recommended.
+
+Missing, malformed, null, and non-object bodies return HTTP 422 before the handler
+runs. Routes without a body argument ignore request bodies. FastAPI factories
+use the request parsing and validation configured by the application.
+
 ## Deployed tasks
 
 The control plane starts production task pods through the shared bootstrap with

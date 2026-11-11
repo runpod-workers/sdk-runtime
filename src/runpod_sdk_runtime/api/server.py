@@ -123,7 +123,8 @@ def _build_class_app(handle) -> Any:
 
 def _mount_routes(app: Any, handle, instance) -> None:
     """add each @get/@post route of an ApiHandle's class to a fastapi app."""
-    from fastapi import Body
+    from fastapi import Request
+    from fastapi.exceptions import RequestValidationError
 
     for route in handle.spec.routes:
         method = getattr(route, "method", None) or route["method"]
@@ -131,17 +132,40 @@ def _mount_routes(app: Any, handle, instance) -> None:
         handler_name = getattr(route, "handler_name", None) or route["handler"]
         bound = getattr(instance, handler_name)
 
-        def make_endpoint(fn):
-            if sys.version_info >= (3, 14):
-                from annotationlib import Format
+        if sys.version_info >= (3, 14):
+            from annotationlib import Format
 
-                signature = inspect.signature(fn, annotation_format=Format.STRING)
-            else:
-                signature = inspect.signature(fn)
+            signature = inspect.signature(bound, annotation_format=Format.STRING)
+        else:
+            signature = inspect.signature(bound)
+        accepts_body = bool(signature.parameters)
 
-            if signature.parameters:
+        def make_endpoint(fn, accepts_body):
+            if accepts_body:
 
-                async def endpoint(body: dict = Body(...)):
+                async def endpoint(request: Request):
+                    try:
+                        body = await request.json()
+                    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                        raise RequestValidationError(
+                            [
+                                {
+                                    "loc": ("body",),
+                                    "msg": "Invalid JSON",
+                                    "type": "json_invalid",
+                                }
+                            ]
+                        ) from exc
+                    if not isinstance(body, dict):
+                        raise RequestValidationError(
+                            [
+                                {
+                                    "loc": ("body",),
+                                    "msg": "Input should be a valid dictionary",
+                                    "type": "dict_type",
+                                }
+                            ]
+                        )
                     return await _maybe_await(fn(body))
 
             else:
@@ -152,7 +176,23 @@ def _mount_routes(app: Any, handle, instance) -> None:
             return endpoint
 
         app.add_api_route(
-            path, make_endpoint(bound), methods=[method], name=handler_name
+            path,
+            make_endpoint(bound, accepts_body),
+            methods=[method],
+            name=handler_name,
+            openapi_extra={
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object", "additionalProperties": True}
+                        }
+                    },
+                },
+                "responses": {"422": {"description": "Validation Error"}},
+            }
+            if accepts_body
+            else None,
         )
 
 

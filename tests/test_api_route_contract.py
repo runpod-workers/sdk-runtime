@@ -105,6 +105,62 @@ def test_native_body_receives_complete_object(native_client, method, body):
     assert native_client.get("/calls").json() == {"calls": 1}
 
 
+@pytest.fixture(
+    params=[
+        None,
+        "application/json",
+        "application/json; charset=utf-8",
+        "application/vnd.api+json",
+        "application/x-www-form-urlencoded",
+        "text/plain",
+        "application/octet-stream",
+    ]
+)
+def body_headers(request):
+    return {"Content-Type": request.param} if request.param else {}
+
+
+@pytest.mark.parametrize("method", ["post", "put", "patch", "delete"])
+def test_native_json_object_ignores_content_type(native_client, body_headers, method):
+    response = native_client.request(
+        method,
+        f"/{method}/body",
+        content='{"prompt":"hi","nested":[null,true,1]}',
+        headers=body_headers,
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "method": method,
+        "body": {"prompt": "hi", "nested": [None, True, 1]},
+    }
+    assert native_client.get("/calls").json() == {"calls": 1}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"", b"null", b"[]", b'"text"', b"42", b"true", b'{"x":', b"prompt=hi", b"\xff"],
+)
+def test_native_invalid_body_rejected_for_every_content_type(
+    native_client, body_headers, content
+):
+    response = native_client.post("/post/body", content=content, headers=body_headers)
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body"]
+    assert native_client.get("/calls").json() == {"calls": 0}
+
+
+def test_native_openapi_describes_required_object_body(native_client):
+    paths = native_client.get("/openapi.json").json()["paths"]
+    for method in ("post", "put", "patch", "delete"):
+        operation = paths[f"/{method}/body"][method]
+        assert operation["requestBody"]["required"] is True
+        schema = operation["requestBody"]["content"]["application/json"]["schema"]
+        assert schema["type"] == "object"
+        assert "422" in operation["responses"]
+    for method in ("get", "post", "put", "patch", "delete"):
+        assert "requestBody" not in paths[f"/{method}/noarg"][method]
+
+
 @pytest.mark.parametrize("method", ["post", "put", "patch", "delete"])
 @pytest.mark.parametrize(
     "content",
@@ -211,6 +267,15 @@ def test_factory_typed_path_query_and_body(factory_client):
         "count": 2,
         "label": "hello",
     }
+
+
+def test_factory_keeps_content_type_validation(factory_client):
+    response = factory_client.post(
+        "/items/7?limit=3",
+        content='{"count":2,"label":"hello"}',
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 422
 
 
 @pytest.mark.parametrize(
