@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/runpod-workers/sdk-runtime/compare/runpod-sdk-runtime-v0.2.2...runpod-sdk-runtime-v0.2.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* **api:** accept JSON bodies regardless of content type ([#14](https://github.com/runpod-workers/sdk-runtime/issues/14)) ([4d6d58c](https://github.com/runpod-workers/sdk-runtime/commit/4d6d58c620df79abdc81670d08756a72e5371bc4))
+
 ## [0.2.2](https://github.com/runpod-workers/sdk-runtime/compare/runpod-sdk-runtime-v0.2.1...runpod-sdk-runtime-v0.2.2) (2026-11-11)
 
 
