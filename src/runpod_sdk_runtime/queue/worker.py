@@ -16,6 +16,7 @@ live mode (rp dev):
     runpod_sdk_runtime.executor.
 """
 
+import asyncio
 import importlib
 import inspect
 import json
@@ -156,7 +157,7 @@ async def _live_handler(job: dict):
                 yield serialize_chunk(chunk, request)
             return
 
-        yield execute_request(request, prepared=prepared)
+        yield await asyncio.to_thread(execute_request, request, prepared=prepared)
     except Exception:
         yield {"success": False, "error": traceback.format_exc()}
 
