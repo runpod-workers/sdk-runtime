@@ -215,14 +215,12 @@ def _materialize_source(function_code):
 
 
 _stdout_lock = threading.Lock()
-_stdout_router = None
 
 
 class _StdoutRouter:
     def __init__(self, fallback):
         self.fallback = fallback
         self.stream = contextvars.ContextVar("request_stdout", default=fallback)
-        self.users = 0
 
     def write(self, text):
         return self.stream.get().write(text)
@@ -240,26 +238,16 @@ class _StdoutRouter:
 
 @contextmanager
 def _capture_stdout(buffer):
-    global _stdout_router
-
     with _stdout_lock:
-        if _stdout_router is None:
-            _stdout_router = _StdoutRouter(sys.stdout)
-            sys.stdout = _stdout_router
-        router = _stdout_router
-        router.users += 1
+        if not isinstance(sys.stdout, _StdoutRouter):
+            sys.stdout = _StdoutRouter(sys.stdout)
+        router = sys.stdout
 
     token = router.stream.set(_Tee(buffer, sys.__stdout__))
     try:
         yield
     finally:
         router.stream.reset(token)
-        with _stdout_lock:
-            router.users -= 1
-            if router.users == 0:
-                if sys.stdout is router:
-                    sys.stdout = router.fallback
-                _stdout_router = None
 
 
 class _Tee(io.TextIOBase):

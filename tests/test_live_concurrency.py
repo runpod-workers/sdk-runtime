@@ -56,6 +56,7 @@ async def test_live_jobs_overlap_with_isolated_stdout(
             )
         ]
 
+    executor.execute_request({}, prepared=(lambda: None, [], {}))
     stdout = sys.stdout
     tasks = [asyncio.create_task(run(i)) for i in range(4)]
     try:
@@ -129,6 +130,7 @@ async def test_serverless_scheduler_honors_live_concurrency(monkeypatch, limit):
 
 
 async def test_sync_executor_captures_async_output_with_running_loop():
+    executor.execute_request({}, prepared=(lambda: None, [], {}))
     stdout = sys.stdout
     response = executor.execute_request(
         {
