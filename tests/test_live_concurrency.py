@@ -1,6 +1,8 @@
 import asyncio
+import contextvars
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import ModuleType
 
 import pytest
@@ -9,6 +11,14 @@ from runpod.serverless.modules.rp_scale import JobScaler
 
 from runpod_sdk_runtime import executor
 from runpod_sdk_runtime.queue import worker
+
+
+@pytest.fixture(autouse=True)
+def live_executor(monkeypatch):
+    monkeypatch.setattr(worker, "_live_executor", None, raising=False)
+    yield
+    if worker._live_executor is not None:
+        worker._live_executor.shutdown(wait=True, cancel_futures=True)
 
 
 @pytest.mark.parametrize("async_function", [False, True])
@@ -150,3 +160,119 @@ async def test_sync_executor_captures_async_output_with_running_loop():
         "json_result": 42,
     }
     assert sys.stdout is stdout
+
+
+@pytest.mark.parametrize("limit", [1, 4])
+async def test_cancelled_jobs_hold_capacity_until_execution_finishes(
+    monkeypatch, limit
+):
+    monkeypatch.setenv("RUNPOD_MAX_CONCURRENCY", str(limit))
+    loop = asyncio.get_running_loop()
+    started = [asyncio.Event() for _ in range(limit * 2)]
+    replacements_submitted = asyncio.Event()
+    release = [threading.Event(), threading.Event()]
+    lock = threading.Lock()
+    active = peak = 0
+
+    def fn(i):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        loop.call_soon_threadsafe(started[i].set)
+        try:
+            assert release[i // limit].wait(10)
+            return i
+        finally:
+            with lock:
+                active -= 1
+
+    def resolve(request):
+        i = request["i"]
+        if i == limit * 2 - 1:
+            replacements_submitted.set()
+        return (fn, [i], {}), None
+
+    monkeypatch.setattr(executor, "resolve_request", resolve)
+    scaler = JobScaler(worker._worker_config(worker._live_handler))
+    await scaler.set_scale()
+    results = []
+
+    async def handle_job(session, job):
+        async for chunk in run_job_generator(scaler.config["handler"], job):
+            results.append(chunk["output"])
+
+    monkeypatch.setattr(scaler, "handle_job", handle_job)
+    monkeypatch.setattr(scaler, "is_alive", lambda: False)
+    scaler.jobs_queue = asyncio.Queue()
+    for i in range(limit * 2):
+        scaler.jobs_queue.put_nowait({"id": str(i), "input": {"i": i}})
+    dispatcher = asyncio.create_task(scaler.run_jobs(None))
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in started[:limit])), 5
+        )
+        for i in range(limit):
+            assert await scaler.stop_job(str(i))
+        await asyncio.wait_for(replacements_submitted.wait(), 5)
+        await asyncio.sleep(0.05)
+        assert not any(event.is_set() for event in started[limit:])
+        with lock:
+            assert active == limit
+        release[0].set()
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in started[limit:])), 5
+        )
+        release[1].set()
+        await asyncio.wait_for(asyncio.shield(dispatcher), 5)
+        assert sorted(result["json_result"] for result in results) == list(
+            range(limit, limit * 2)
+        )
+        assert peak == limit
+        assert active == 0
+    finally:
+        for event in release:
+            event.set()
+        await asyncio.wait_for(dispatcher, 5)
+
+
+@pytest.mark.parametrize("limit", [8, 64])
+async def test_live_capacity_is_independent_of_default_executor(monkeypatch, limit):
+    monkeypatch.setenv("RUNPOD_MAX_CONCURRENCY", str(limit))
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    default_started = asyncio.Event()
+    release_default = threading.Event()
+    started = threading.Barrier(limit, timeout=5)
+    request_context = contextvars.ContextVar("live_test_request")
+
+    def block_default():
+        loop.call_soon_threadsafe(default_started.set)
+        assert release_default.wait(10)
+
+    def fn():
+        started.wait()
+        return request_context.get()
+
+    monkeypatch.setattr(
+        executor, "resolve_request", lambda request: ((fn, [], {}), None)
+    )
+
+    async def run(i):
+        token = request_context.set(i)
+        try:
+            return [chunk async for chunk in worker._live_handler({"input": {}})]
+        finally:
+            request_context.reset(token)
+
+    blocker = asyncio.create_task(asyncio.to_thread(block_default))
+    tasks = []
+    try:
+        await asyncio.wait_for(default_started.wait(), 5)
+        tasks = [asyncio.create_task(run(i)) for i in range(limit)]
+        results = await asyncio.wait_for(asyncio.gather(*tasks), 7)
+        assert [chunks[0]["json_result"] for chunks in results] == list(range(limit))
+    finally:
+        release_default.set()
+        await blocker
+        await asyncio.gather(*tasks, return_exceptions=True)
