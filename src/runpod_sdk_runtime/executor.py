@@ -8,6 +8,7 @@ dev mode, api servers) drives this same engine.
 the runpod sdk supplies the shared protocol and json validation rules.
 """
 
+import contextvars
 import inspect
 import io
 import os
@@ -16,7 +17,7 @@ import subprocess
 import sys
 import threading
 import traceback
-from contextlib import redirect_stdout
+from contextlib import contextmanager
 
 
 def _install(packages, label):
@@ -174,7 +175,7 @@ def execute_request(request, *, prepared=None, run_awaitable=None):
         # streaming in dev sessions) carry the function's prints.
         # sys.stderr carries the runner's own request logs from other
         # threads, which must not leak into job output
-        with redirect_stdout(_Tee(stdout_io, sys.__stdout__)):
+        with _capture_stdout(stdout_io):
             result = fn(*args, **kwargs)
             if hasattr(result, "__await__"):
                 result = await_result(result)
@@ -213,6 +214,42 @@ def _materialize_source(function_code):
     return path
 
 
+_stdout_lock = threading.Lock()
+
+
+class _StdoutRouter:
+    def __init__(self, fallback):
+        self.fallback = fallback
+        self.stream = contextvars.ContextVar("request_stdout", default=fallback)
+
+    def write(self, text):
+        return self.stream.get().write(text)
+
+    def flush(self):
+        return self.stream.get().flush()
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def __getattr__(self, name):
+        return getattr(self.fallback, name)
+
+
+@contextmanager
+def _capture_stdout(buffer):
+    with _stdout_lock:
+        if not isinstance(sys.stdout, _StdoutRouter):
+            sys.stdout = _StdoutRouter(sys.stdout)
+        router = sys.stdout
+
+    token = router.stream.set(_Tee(buffer, sys.__stdout__))
+    try:
+        yield
+    finally:
+        router.stream.reset(token)
+
+
 class _Tee(io.TextIOBase):
     """write-through to multiple streams, flushing eagerly so log
     followers see lines as they happen."""
@@ -243,10 +280,8 @@ class _Tee(io.TextIOBase):
 def _run_awaitable(awaitable):
     """drive an awaitable to completion from sync code.
 
-    task pods run this on plain threads, but queue workers in live mode
-    call execute_request from inside the serverless event loop, where
-    asyncio.run would raise; a private loop on a helper thread covers
-    both.
+    a caller with an active event loop uses a helper thread with its
+    request context. plain threads drive the awaitable on their own loop.
     """
     import asyncio
 
@@ -258,7 +293,9 @@ def _run_awaitable(awaitable):
     import concurrent.futures
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, _await(awaitable)).result()
+        return pool.submit(
+            contextvars.copy_context().run, asyncio.run, _await(awaitable)
+        ).result()
 
 
 async def _drain_async_gen(agen):

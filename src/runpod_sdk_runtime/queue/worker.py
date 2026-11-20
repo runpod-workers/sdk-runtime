@@ -16,12 +16,16 @@ live mode (rp dev):
     runpod_sdk_runtime.executor.
 """
 
+import asyncio
+import contextvars
 import importlib
 import inspect
 import json
 import os
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import runpod
 from runpod._serialization import validate_json
@@ -30,6 +34,7 @@ from runpod_sdk_runtime.mounts import configure_mounts
 
 APP_DIR = os.environ.get("RUNPOD_APP_DIR", "/app")
 MANIFEST_NAME = "runpod_manifest.json"
+_live_executor = None
 
 
 def _resource_name() -> str:
@@ -133,6 +138,8 @@ def _run_init(handle) -> None:
 async def _live_handler(job: dict):
     """execute a FunctionRequest, streaming when the function is a
     generator so dev sessions behave exactly like deployed workers."""
+    global _live_executor
+
     from runpod_sdk_runtime.executor import (
         execute_request,
         resolve_request,
@@ -156,7 +163,13 @@ async def _live_handler(job: dict):
                 yield serialize_chunk(chunk, request)
             return
 
-        yield execute_request(request, prepared=prepared)
+        if _live_executor is None:
+            _live_executor = ThreadPoolExecutor(max_workers=_max_concurrency())
+        yield await asyncio.get_running_loop().run_in_executor(
+            _live_executor,
+            contextvars.copy_context().run,
+            partial(execute_request, request, prepared=prepared),
+        )
     except Exception:
         yield {"success": False, "error": traceback.format_exc()}
 
